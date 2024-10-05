@@ -115,7 +115,16 @@ namespace NzbDrone.Core.IndexerSearch
             var queue = _queueService.GetQueue().Where(q => q.Album != null).Select(q => q.Album.Id);
             var missing = albums.Where(e => !queue.Contains(e.Id)).ToList();
 
-            SearchForBulkAlbums(missing, message.Trigger == CommandTrigger.Manual).GetAwaiter().GetResult();
+            if (missing.Count == 0)
+            {
+                _logger.Info("No missing albums found for {0} artist id.", message.ArtistId);
+                return;
+            }
+            else
+            {
+                _logger.Info("Searching for {0} missing albums for artist {1}.", missing.Count, message.ArtistId);
+                SearchForBulkAlbums(missing, message.Trigger == CommandTrigger.Manual).GetAwaiter().GetResult();
+            }
         }
 
         public void Execute(CutoffUnmetAlbumSearchCommand message)

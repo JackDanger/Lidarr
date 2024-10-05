@@ -145,10 +145,12 @@ namespace Lidarr.Api.V1.Artist
                 artistsResources.AddRange(_artistService.GetAllArtists().ToResource());
             }
 
+            /* remove N+1
             MapCoversToLocal(artistsResources.ToArray());
             LinkNextPreviousAlbums(artistsResources.ToArray());
             LinkArtistStatistics(artistsResources, artistStats.ToDictionary(x => x.ArtistId));
             artistsResources.ForEach(LinkRootFolderPath);
+            */
 
             // PopulateAlternateTitles(seriesResources);
             return artistsResources;
