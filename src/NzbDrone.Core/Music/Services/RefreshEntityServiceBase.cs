@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading.Tasks;
 using NLog;
 
 namespace NzbDrone.Core.Music
@@ -201,13 +202,17 @@ namespace NzbDrone.Core.Music
 
         public bool RefreshEntityInfo(List<TEntity> localList, List<TEntity> remoteList, bool forceChildRefresh, bool forceUpdateFileTags)
         {
-            var updated = false;
-            foreach (var entity in localList)
-            {
-                updated |= RefreshEntityInfo(entity, remoteList, forceChildRefresh, forceUpdateFileTags, null);
-            }
+            var updatedFlag = 0;
 
-            return updated;
+            Parallel.ForEach(localList, new ParallelOptions { MaxDegreeOfParallelism = 16 }, entity =>
+            {
+                if (RefreshEntityInfo(entity, remoteList, forceChildRefresh, forceUpdateFileTags, null))
+                {
+                    System.Threading.Interlocked.Exchange(ref updatedFlag, 1);
+                }
+            });
+
+            return updatedFlag == 1;
         }
 
         public UpdateResult UpdateArtistMetadata(List<ArtistMetadata> data)
