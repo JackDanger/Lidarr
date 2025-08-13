@@ -133,7 +133,7 @@ namespace Lidarr.Api.V1.Artist
         [Produces("application/json")]
         public List<ArtistResource> AllArtists(Guid? mbId)
         {
-            var artistStats = _artistStatisticsService.ArtistStatistics();
+            // var artistStats = _artistStatisticsService.ArtistStatistics();
             var artistsResources = new List<ArtistResource>();
 
             if (mbId.HasValue)
