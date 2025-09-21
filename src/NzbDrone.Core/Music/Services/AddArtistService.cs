@@ -48,6 +48,18 @@ namespace NzbDrone.Core.Music
         {
             Ensure.That(newArtist, () => newArtist).IsNotNull();
 
+            // Idempotence: if artist exists by MBID, return existing and optionally refresh
+            var existing = _artistService.FindById(newArtist.Metadata.Value.ForeignArtistId);
+            if (existing != null)
+            {
+                if (doRefresh)
+                {
+                    _logger.Info("Artist already exists {0}, skipping add and triggering refresh", existing);
+                }
+
+                return existing;
+            }
+
             newArtist = AddSkyhookData(newArtist);
             newArtist = SetPropertiesAndValidate(newArtist);
 
@@ -82,6 +94,14 @@ namespace NzbDrone.Core.Music
 
                 try
                 {
+                    // Skip if already exists (dedupe by MBID)
+                    var dupe = _artistService.FindById(s.Metadata.Value.ForeignArtistId);
+                    if (dupe != null)
+                    {
+                        _logger.Debug("Musicbrainz ID {0} already exists, skipping", s.Metadata.Value.ForeignArtistId);
+                        continue;
+                    }
+
                     var artist = AddSkyhookData(s);
                     artist = SetPropertiesAndValidate(artist);
                     artist.Added = added;
