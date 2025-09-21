@@ -7,6 +7,7 @@ using Npgsql;
 using NUnit.Framework;
 using NzbDrone.Common.Extensions;
 using NzbDrone.Core.Datastore;
+using NzbDrone.Core.Datastore.Extensions;
 using NzbDrone.Core.Music;
 using NzbDrone.Core.Profiles.Metadata;
 using NzbDrone.Core.Profiles.Qualities;
@@ -169,6 +170,31 @@ namespace NzbDrone.Core.Test.MusicTests.ArtistRepositoryTests
             {
                 insertDupe.Should().Throw<SQLiteException>();
             }
+        }
+
+        [Test]
+        public void should_page_artists()
+        {
+            // add multiple
+            for (var i = 0; i < 25; i++)
+            {
+                AddArtist($"Artist {i:000}", Guid.NewGuid().ToString());
+            }
+
+            var spec = new PagingSpec<Artist>
+            {
+                Page = 2,
+                PageSize = 10,
+                SortKey = "artists.sortName",
+                SortDirection = SortDirection.Ascending
+            };
+
+            var result = Subject.GetPaged(spec);
+
+            result.Page.Should().Be(2);
+            result.PageSize.Should().Be(10);
+            result.TotalRecords.Should().BeGreaterThan(10);
+            result.Records.Count.Should().Be(10);
         }
     }
 }
