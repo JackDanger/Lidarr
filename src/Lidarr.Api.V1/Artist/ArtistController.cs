@@ -9,6 +9,7 @@ using Lidarr.Http.REST.Attributes;
 using Microsoft.AspNetCore.Mvc;
 using NzbDrone.Common.Extensions;
 using NzbDrone.Core.ArtistStats;
+using NzbDrone.Core.Datastore;
 using NzbDrone.Core.Datastore.Events;
 using NzbDrone.Core.MediaCover;
 using NzbDrone.Core.MediaFiles;
@@ -156,12 +157,39 @@ namespace Lidarr.Api.V1.Artist
             return artistsResources;
         }
 
+        [HttpGet("paged")]
+        [Produces("application/json")]
+        public PagingResource<ArtistResource> GetArtists([FromQuery] PagingRequestResource paging)
+        {
+            var pagingResource = new PagingResource<ArtistResource>(paging);
+            var pagingSpec = pagingResource.MapToPagingSpec<ArtistResource, NzbDrone.Core.Music.Artist>("artists.sortName", SortDirection.Ascending);
+
+            var paged = _artistService.Paged(pagingSpec);
+
+            return new PagingResource<ArtistResource>
+            {
+                Page = paged.Page,
+                PageSize = paged.PageSize,
+                SortKey = paged.SortKey,
+                SortDirection = paged.SortDirection,
+                TotalRecords = paged.TotalRecords,
+                Records = paged.Records.ToResource()
+            };
+        }
+
+        [HttpGet("count")]
+        [Produces("application/json")]
+        public ActionResult<int> GetArtistCount()
+        {
+            return Ok(_artistService.Count());
+        }
+
         [RestPostById]
         [Consumes("application/json")]
         [Produces("application/json")]
-        public ActionResult<ArtistResource> AddArtist([FromBody] ArtistResource artistResource)
+        public ActionResult<ArtistResource> AddArtist(ArtistResource artistResource, [FromQuery] bool doRefresh = true)
         {
-            var artist = _addArtistService.AddArtist(artistResource.ToModel());
+            var artist = _addArtistService.AddArtist(artistResource.ToModel(), doRefresh);
 
             return Created(artist.Id);
         }
@@ -169,7 +197,7 @@ namespace Lidarr.Api.V1.Artist
         [RestPutById]
         [Consumes("application/json")]
         [Produces("application/json")]
-        public ActionResult<ArtistResource> UpdateArtist([FromBody] ArtistResource artistResource, bool moveFiles = false)
+        public ActionResult<ArtistResource> UpdateArtist(ArtistResource artistResource, bool moveFiles = false)
         {
             var artist = _artistService.GetArtist(artistResource.Id);
 

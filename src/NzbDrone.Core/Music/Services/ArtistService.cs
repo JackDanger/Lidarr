@@ -24,6 +24,8 @@ namespace NzbDrone.Core.Music
         void DeleteArtist(int artistId, bool deleteFiles, bool addImportListExclusion = false);
         void DeleteArtists(List<int> artistIds, bool deleteFiles, bool addImportListExclusion = false);
         List<Artist> GetAllArtists();
+        PagingSpec<Artist> Paged(PagingSpec<Artist> pagingSpec);
+        int Count();
         Dictionary<int, List<int>> GetAllArtistsTags();
         List<Artist> AllForTag(int tagId);
         Artist UpdateArtist(Artist artist, bool publishUpdatedEvent = true);
@@ -183,6 +185,16 @@ namespace NzbDrone.Core.Music
         public List<Artist> GetAllArtists()
         {
             return _cache.Get("GetAllArtists", () => _artistRepository.All().ToList(), TimeSpan.FromSeconds(30));
+        }
+
+        public PagingSpec<Artist> Paged(PagingSpec<Artist> pagingSpec)
+        {
+            return _artistRepository.GetPaged(pagingSpec);
+        }
+
+        public int Count()
+        {
+            return _artistRepository.Count();
         }
 
         public Dictionary<int, string> AllArtistPaths()
