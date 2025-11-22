@@ -1,3 +1,4 @@
+using System.Linq;
 using NLog;
 using NzbDrone.Core.DecisionEngine;
 using NzbDrone.Core.Download;
@@ -24,7 +25,23 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Specifications
 
             if (item.NewDownload && item.TrackMapping.MBExtra.Count > 0)
             {
-                _logger.Debug("This release is missing tracks. Skipping {0}", item);
+                // Allow import if the incoming release has more tracks than currently exist (or none exist)
+                var existingTrackCount = 0;
+
+                var album = item.AlbumRelease?.Album?.Value;
+                var existingRelease = album?.AlbumReleases.Value.SingleOrDefault(x => x.Monitored);
+                if (existingRelease != null)
+                {
+                    existingTrackCount = existingRelease.Tracks.Value.Count(t => t.HasFile);
+                }
+
+                if (item.TrackCount > existingTrackCount)
+                {
+                    _logger.Debug("Release missing tracks but improves track count ({0} > {1}). Accepting {2}", item.TrackCount, existingTrackCount, item);
+                    return Decision.Accept();
+                }
+
+                _logger.Debug("This release is missing tracks and does not improve existing track count ({0} <= {1}). Skipping {2}", item.TrackCount, existingTrackCount, item);
                 return Decision.Reject("Has missing tracks");
             }
 
