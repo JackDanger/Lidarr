@@ -55,6 +55,15 @@ namespace NzbDrone.Core.Download
             {
                 try
                 {
+                    // Normalize any lingering 'Importing' state on startup so items don't get stuck indefinitely
+                    if (enableCompletedDownloadHandling &&
+                        trackedDownload.DownloadItem.Status == DownloadItemStatus.Completed &&
+                        trackedDownload.State == TrackedDownloadState.Importing)
+                    {
+                        trackedDownload.State = TrackedDownloadState.ImportPending;
+                        trackedDownload.Warn("Resuming import after restart.");
+                    }
+
                     if (trackedDownload.State == TrackedDownloadState.DownloadFailedPending)
                     {
                         _failedDownloadService.ProcessFailed(trackedDownload);
@@ -67,6 +76,14 @@ namespace NzbDrone.Core.Download
                 catch (Exception e)
                 {
                     _logger.Debug(e, "Failed to process download: {0}", trackedDownload.DownloadItem.Title);
+
+                    // Ensure forward progress: if an exception occurred during import after setting state to Importing,
+                    // do not leave the item stuck in Importing indefinitely. Move it back to ImportPending so it will retry.
+                    if (trackedDownload.State == TrackedDownloadState.Importing)
+                    {
+                        trackedDownload.State = TrackedDownloadState.ImportPending;
+                        trackedDownload.Warn("Automatic import encountered an unexpected error and will be retried.");
+                    }
                 }
             }
 
