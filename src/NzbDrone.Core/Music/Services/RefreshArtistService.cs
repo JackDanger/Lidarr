@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using NLog;
 using NzbDrone.Common.EnsureThat;
@@ -80,10 +81,23 @@ namespace NzbDrone.Core.Music
 
         protected override RemoteData GetRemoteData(Artist local, List<Artist> remote)
         {
+            return GetRemoteDataAsync(local, remote).GetAwaiter().GetResult();
+        }
+
+        protected override async Task<RemoteData> GetRemoteDataAsync(Artist local, List<Artist> remote)
+        {
             var result = new RemoteData();
             try
             {
-                result.Entity = _artistInfo.GetArtistInfo(local.Metadata.Value.ForeignArtistId, local.MetadataProfileId);
+                var asyncProvider = _artistInfo as IProvideArtistInfoAsync;
+                if (asyncProvider != null)
+                {
+                    result.Entity = await asyncProvider.GetArtistInfoAsync(local.Metadata.Value.ForeignArtistId, local.MetadataProfileId);
+                }
+                else
+                {
+                    result.Entity = await Task.FromResult(_artistInfo.GetArtistInfo(local.Metadata.Value.ForeignArtistId, local.MetadataProfileId));
+                }
                 result.Metadata = new List<ArtistMetadata> { result.Entity.Metadata.Value };
             }
             catch (ArtistNotFoundException)
@@ -331,15 +345,23 @@ namespace NzbDrone.Core.Music
         {
             var artists = _artistService.GetArtists(artistIds);
 
-            var updatedFlag = 0;
+            var updated = RefreshArtistsAsync(artists, true, false, null).GetAwaiter().GetResult();
 
-            Parallel.ForEach(artists, new ParallelOptions { MaxDegreeOfParallelism = 16 }, artist =>
+            RescanArtists(artists, isNew, trigger, updated);
+        }
+
+        private async Task<bool> RefreshArtistsAsync(List<Artist> artists, bool forceChildRefresh, bool forceUpdateFileTags, DateTime? lastStartTime)
+        {
+            var updatedFlag = 0;
+            var semaphore = new SemaphoreSlim(16); // Max 16 concurrent refreshes
+            var tasks = artists.Select(async artist =>
             {
+                await semaphore.WaitAsync();
                 try
                 {
-                    if (RefreshEntityInfo(artist, null, true, false, null))
+                    if (await RefreshEntityInfoAsync(artist, null, forceChildRefresh, forceUpdateFileTags, lastStartTime))
                     {
-                        System.Threading.Interlocked.Exchange(ref updatedFlag, 1);
+                        Interlocked.Exchange(ref updatedFlag, 1);
                     }
 
                     UpdateTags(artist);
@@ -349,11 +371,14 @@ namespace NzbDrone.Core.Music
                     _logger.Error(e, "Couldn't refresh info for {0}", artist);
                     UpdateTags(artist);
                 }
+                finally
+                {
+                    semaphore.Release();
+                }
             });
 
-            var updated = updatedFlag == 1;
-
-            RescanArtists(artists, isNew, trigger, updated);
+            await Task.WhenAll(tasks);
+            return updatedFlag == 1;
         }
 
         private void UpdateTags(Artist artist)
@@ -405,9 +430,7 @@ namespace NzbDrone.Core.Music
             }
             else
             {
-                var updated = false;
                 var artists = _artistService.GetAllArtists().OrderBy(c => c.Name).ToList();
-                var artistIds = artists.Select(x => x.Id).ToList();
 
                 var updatedMusicbrainzArtists = new HashSet<string>();
 
@@ -416,38 +439,25 @@ namespace NzbDrone.Core.Music
                     updatedMusicbrainzArtists = _artistInfo.GetChangedArtists(message.LastStartTime.Value);
                 }
 
-                var updatedFlag = 0;
+                var manualTrigger = message.Trigger == CommandTrigger.Manual;
 
-                Parallel.ForEach(artists, new ParallelOptions { MaxDegreeOfParallelism = 16 }, artist =>
+                // Filter artists that need refresh
+                var artistsToRefresh = artists.Where(artist =>
+                    (updatedMusicbrainzArtists == null && _checkIfArtistShouldBeRefreshed.ShouldRefresh(artist)) ||
+                    (updatedMusicbrainzArtists != null && updatedMusicbrainzArtists.Contains(artist.ForeignArtistId)) ||
+                    manualTrigger).ToList();
+
+                var artistsToSkip = artists.Except(artistsToRefresh).ToList();
+
+                // Update tags for skipped artists
+                foreach (var artist in artistsToSkip)
                 {
-                    var manualTrigger = message.Trigger == CommandTrigger.Manual;
+                    _logger.Info("Skipping refresh of artist: {0}", artist.Name);
+                    UpdateTags(artist);
+                }
 
-                    if ((updatedMusicbrainzArtists == null && _checkIfArtistShouldBeRefreshed.ShouldRefresh(artist)) ||
-                        (updatedMusicbrainzArtists != null && updatedMusicbrainzArtists.Contains(artist.ForeignArtistId)) ||
-                        manualTrigger)
-                    {
-                        try
-                        {
-                            if (RefreshEntityInfo(artist, null, manualTrigger, false, message.LastStartTime))
-                            {
-                                System.Threading.Interlocked.Exchange(ref updatedFlag, 1);
-                            }
-                        }
-                        catch (Exception e)
-                        {
-                            _logger.Error(e, "Couldn't refresh info for {0}", artist);
-                        }
-
-                        UpdateTags(artist);
-                    }
-                    else
-                    {
-                        _logger.Info("Skipping refresh of artist: {0}", artist.Name);
-                        UpdateTags(artist);
-                    }
-                });
-
-                updated |= updatedFlag == 1;
+                // Refresh artists that need it using async
+                var updated = RefreshArtistsAsync(artistsToRefresh, manualTrigger, false, message.LastStartTime).GetAwaiter().GetResult();
 
                 RescanArtists(artists, isNew, trigger, updated);
             }

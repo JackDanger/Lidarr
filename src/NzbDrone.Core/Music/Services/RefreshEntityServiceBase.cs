@@ -59,6 +59,11 @@ namespace NzbDrone.Core.Music
 
         protected abstract RemoteData GetRemoteData(TEntity local, List<TEntity> remote);
 
+        protected virtual Task<RemoteData> GetRemoteDataAsync(TEntity local, List<TEntity> remote)
+        {
+            return Task.FromResult(GetRemoteData(local, remote));
+        }
+
         protected virtual void EnsureNewParent(TEntity local, TEntity remote)
         {
         }
@@ -120,6 +125,93 @@ namespace NzbDrone.Core.Music
             LogProgress(local);
 
             var data = GetRemoteData(local, remoteList);
+            var remote = data.Entity;
+
+            if (remote == null)
+            {
+                if (ShouldDelete(local))
+                {
+                    _logger.Warn($"{typeof(TEntity).Name} {local} not found in metadata and is being deleted");
+                    DeleteEntity(local, true);
+                    return false;
+                }
+                else
+                {
+                    _logger.Error($"{typeof(TEntity).Name} {local} was not found, it may have been removed from Metadata sources.");
+                    return false;
+                }
+            }
+
+            if (data.Metadata != null)
+            {
+                var metadataResult = UpdateArtistMetadata(data.Metadata);
+                updated |= metadataResult >= UpdateResult.Standard;
+                forceUpdateFileTags |= metadataResult == UpdateResult.UpdateTags;
+            }
+
+            // Validate that the parent object exists (remote data might specify a different one)
+            EnsureNewParent(local, remote);
+
+            UpdateResult result;
+            if (IsMerge(local, remote))
+            {
+                // get entity we're merging into
+                var target = GetEntityByForeignId(remote);
+
+                if (target == null)
+                {
+                    _logger.Trace($"Moving {typeof(TEntity).Name} {local} to {remote}");
+                    result = MoveEntity(local, remote);
+                }
+                else
+                {
+                    _logger.Trace($"Merging {typeof(TEntity).Name} {local} into {target}");
+                    result = MergeEntity(local, target, remote);
+
+                    // having merged local into target, do update for target using remote
+                    local = target;
+                }
+
+                // Save the entity early so that children see the updated ids
+                SaveEntity(local);
+            }
+            else
+            {
+                _logger.Trace($"Updating {typeof(TEntity).Name} {local}");
+                result = UpdateEntity(local, remote);
+            }
+
+            updated |= result >= UpdateResult.Standard;
+            forceUpdateFileTags |= result == UpdateResult.UpdateTags;
+
+            _logger.Trace($"updated: {updated} forceUpdateFileTags: {forceUpdateFileTags}");
+
+            var remoteChildren = GetRemoteChildren(remote);
+            updated |= SortChildren(local, remoteChildren, forceChildRefresh, forceUpdateFileTags, lastUpdate);
+
+            // Do this last so entity only marked as refreshed if refresh of children completed successfully
+            _logger.Trace($"Saving {typeof(TEntity).Name} {local}");
+            SaveEntity(local);
+
+            if (updated)
+            {
+                PublishEntityUpdatedEvent(local);
+            }
+
+            PublishRefreshCompleteEvent(local);
+
+            _logger.Debug($"Finished {typeof(TEntity).Name} refresh for {local}");
+
+            return updated;
+        }
+
+        public async Task<bool> RefreshEntityInfoAsync(TEntity local, List<TEntity> remoteList, bool forceChildRefresh, bool forceUpdateFileTags, DateTime? lastUpdate)
+        {
+            var updated = false;
+
+            LogProgress(local);
+
+            var data = await GetRemoteDataAsync(local, remoteList);
             var remote = data.Entity;
 
             if (remote == null)

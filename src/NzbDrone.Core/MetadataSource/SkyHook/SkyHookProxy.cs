@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
+using System.Threading.Tasks;
 using NLog;
 using NzbDrone.Common.Cache;
 using NzbDrone.Common.Extensions;
@@ -15,7 +16,7 @@ using NzbDrone.Core.Profiles.Metadata;
 
 namespace NzbDrone.Core.MetadataSource.SkyHook
 {
-    public class SkyHookProxy : IProvideArtistInfo, ISearchForNewArtist, IProvideAlbumInfo, ISearchForNewAlbum, ISearchForNewEntity
+    public class SkyHookProxy : IProvideArtistInfoAsync, ISearchForNewArtist, IProvideAlbumInfo, ISearchForNewAlbum, ISearchForNewEntity
     {
         private readonly IHttpClient _httpClient;
         private readonly Logger _logger;
@@ -47,6 +48,11 @@ namespace NzbDrone.Core.MetadataSource.SkyHook
 
         public HashSet<string> GetChangedArtists(DateTime startTime)
         {
+            return GetChangedArtistsAsync(startTime).GetAwaiter().GetResult();
+        }
+
+        public async Task<HashSet<string>> GetChangedArtistsAsync(DateTime startTime)
+        {
             var startTimeUtc = (DateTimeOffset)DateTime.SpecifyKind(startTime, DateTimeKind.Utc);
             var httpRequest = _requestBuilder.GetRequestBuilder().Create()
                 .SetSegment("route", "recent/artist")
@@ -55,7 +61,7 @@ namespace NzbDrone.Core.MetadataSource.SkyHook
 
             httpRequest.SuppressHttpError = true;
 
-            var httpResponse = _httpClient.Get<RecentUpdatesResource>(httpRequest);
+            var httpResponse = await _httpClient.GetAsync<RecentUpdatesResource>(httpRequest);
 
             if (httpResponse.Resource.Limited)
             {
@@ -67,6 +73,11 @@ namespace NzbDrone.Core.MetadataSource.SkyHook
 
         public Artist GetArtistInfo(string foreignArtistId, int metadataProfileId)
         {
+            return GetArtistInfoAsync(foreignArtistId, metadataProfileId).GetAwaiter().GetResult();
+        }
+
+        public async Task<Artist> GetArtistInfoAsync(string foreignArtistId, int metadataProfileId)
+        {
             _logger.Debug("Getting Artist with LidarrAPI.MetadataID of {0}", foreignArtistId);
 
             var httpRequest = _requestBuilder.GetRequestBuilder().Create()
@@ -76,7 +87,7 @@ namespace NzbDrone.Core.MetadataSource.SkyHook
             httpRequest.AllowAutoRedirect = true;
             httpRequest.SuppressHttpError = true;
 
-            var httpResponse = _httpClient.Get<ArtistResource>(httpRequest);
+            var httpResponse = await _httpClient.GetAsync<ArtistResource>(httpRequest);
 
             if (httpResponse.HasHttpError)
             {
