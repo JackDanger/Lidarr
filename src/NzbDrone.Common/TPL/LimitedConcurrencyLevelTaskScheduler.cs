@@ -33,7 +33,7 @@ namespace NzbDrone.Common.TPL
                 throw new ArgumentOutOfRangeException(nameof(maxDegreeOfParallelism));
             }
 
-            _maxDegreeOfParallelism = 18;
+            _maxDegreeOfParallelism = maxDegreeOfParallelism;
         }
 
         /// <summary>Queues a task to the scheduler.</summary>
