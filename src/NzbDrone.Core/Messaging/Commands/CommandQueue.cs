@@ -8,6 +8,8 @@ namespace NzbDrone.Core.Messaging.Commands
 {
     public class CommandQueue : IEnumerable
     {
+        private const int MAX_CONCURRENT_DISK_ACCESS = 4;
+
         private readonly object _mutex = new object();
         private readonly List<CommandModel> _items;
 
@@ -166,7 +168,9 @@ namespace NzbDrone.Core.Messaging.Commands
 
                     var queuedCommands = _items.Where(c => c.Status == CommandStatus.Queued);
 
-                    if (startedCommands.Any(x => x.Body.RequiresDiskAccess))
+                    // Allow up to MAX_CONCURRENT_DISK_ACCESS concurrent disk operations
+                    var diskAccessCount = startedCommands.Count(x => x.Body.RequiresDiskAccess);
+                    if (diskAccessCount >= MAX_CONCURRENT_DISK_ACCESS)
                     {
                         queuedCommands = queuedCommands.Where(c => !c.Body.RequiresDiskAccess);
                     }
