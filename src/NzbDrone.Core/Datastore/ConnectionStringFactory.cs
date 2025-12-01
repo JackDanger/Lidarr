@@ -88,7 +88,10 @@ namespace NzbDrone.Core.Datastore
                 Pooling = true,
                 MinPoolSize = 5,
                 MaxPoolSize = 50,
-                ConnectionIdleLifetime = 300
+                ConnectionIdleLifetime = 300,
+                CommandTimeout = 120,
+                Timeout = 30,
+                KeepAlive = 30
             };
 
             return new DatabaseConnectionInfo(DatabaseType.PostgreSQL, connectionBuilder.ConnectionString);
