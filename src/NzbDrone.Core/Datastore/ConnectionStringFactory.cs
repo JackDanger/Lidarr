@@ -84,7 +84,11 @@ namespace NzbDrone.Core.Datastore
                 Username = _configFileProvider.PostgresUser,
                 Password = _configFileProvider.PostgresPassword,
                 Port = _configFileProvider.PostgresPort,
-                Enlist = false
+                Enlist = false,
+                Pooling = true,
+                MinPoolSize = 5,
+                MaxPoolSize = 50,
+                ConnectionIdleLifetime = 300
             };
 
             return new DatabaseConnectionInfo(DatabaseType.PostgreSQL, connectionBuilder.ConnectionString);
