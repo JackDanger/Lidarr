@@ -90,29 +90,36 @@ namespace NzbDrone.Core.Music
             return Query(s => s.ForeignAlbumId == foreignAlbumId).SingleOrDefault();
         }
 
-        // x.Id == null is converted to SQL, so warning incorrect
-#pragma warning disable CS0472
+        // Optimized query using EXISTS instead of JOIN through all tracks.
+        // The EXISTS subquery short-circuits as soon as it finds one track without a file.
+        // We check TrackFileId IS NULL directly instead of LEFT JOIN to TrackFiles,
+        // which is much faster as it avoids joining another table.
         private SqlBuilder AlbumsWithoutFilesBuilder(DateTime currentTime)
         {
             return Builder()
                     .Join<Album, Artist>((l, r) => l.ArtistMetadataId == r.ArtistMetadataId)
-                    .Join<Album, AlbumRelease>((a, r) => a.Id == r.AlbumId)
-                    .Join<AlbumRelease, Track>((r, t) => r.Id == t.AlbumReleaseId)
-                    .LeftJoin<Track, TrackFile>((t, f) => t.TrackFileId == f.Id)
-                    .Where<TrackFile>(f => f.Id == null)
-                    .Where<AlbumRelease>(r => r.Monitored == true)
                     .Where<Album>(a => a.ReleaseDate <= currentTime)
+                    .Where(@"EXISTS (
+                        SELECT 1 FROM ""AlbumReleases"" ar
+                        JOIN ""Tracks"" t ON ar.""Id"" = t.""AlbumReleaseId""
+                        WHERE ar.""AlbumId"" = ""Albums"".""Id""
+                          AND ar.""Monitored"" = true
+                          AND t.""TrackFileId"" IS NULL
+                    )")
                     .GroupBy<Album>(x => x.Id)
                     .GroupBy<Artist>(x => x.SortName);
         }
-#pragma warning restore CS0472
 
         public PagingSpec<Album> AlbumsWithoutFiles(PagingSpec<Album> pagingSpec)
         {
             var currentTime = DateTime.UtcNow;
+            var builder = AlbumsWithoutFilesBuilder(currentTime);
 
-            pagingSpec.Records = GetPagedRecords(AlbumsWithoutFilesBuilder(currentTime), pagingSpec, PagedQuery);
-            pagingSpec.TotalRecords = GetPagedRecordCount(AlbumsWithoutFilesBuilder(currentTime).SelectCountDistinct<Album>(x => x.Id), pagingSpec);
+            pagingSpec.Records = GetPagedRecords(builder, pagingSpec, PagedQuery);
+
+            // Use a separate builder for count to avoid sharing modified state
+            var countBuilder = AlbumsWithoutFilesBuilder(currentTime);
+            pagingSpec.TotalRecords = GetPagedRecordCount(countBuilder.SelectCountDistinct<Album>(x => x.Id), pagingSpec);
 
             return pagingSpec;
         }
