@@ -99,8 +99,8 @@ namespace NzbDrone.Core.Parser.Model
                     }
                 }
 
-                var trackTitles = string.Join(" ", LocalTracks.Select(x => x.FileTrackInfo?.TrackTitle ?? "")).ToLower();
-                int classicalMatches = 0;
+                var trackTitles = string.Join(" ", LocalTracks.Select(x => x.FileTrackInfo?.Title ?? "")).ToLower();
+                var classicalMatches = 0;
 
                 foreach (var pattern in classicalPatterns)
                 {
