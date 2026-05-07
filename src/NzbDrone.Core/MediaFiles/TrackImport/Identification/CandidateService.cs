@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using NLog;
 using NzbDrone.Common.Extensions;
@@ -267,6 +268,11 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Identification
                     }
 
                     remoteAlbums = _albumSearchService.SearchForNewAlbum(albumTag, artistTag);
+
+                    if (remoteAlbums.Count == 0 && albumTag.Length > 5)
+                    {
+                        remoteAlbums = TryFuzzyMatchAlbum(albumTag, artistTag);
+                    }
                 }
             }
             catch (SkyHookException e)
@@ -369,6 +375,43 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Identification
             _logger.Debug($"Getting {candidates.Count} remote candidates from tags for {localAlbumRelease.LocalTracks.Count} tracks took {watch.ElapsedMilliseconds}ms");
 
             return candidates;
+        }
+
+        private List<Album> TryFuzzyMatchAlbum(string albumTitle, string artistName)
+        {
+            try
+            {
+                if (albumTitle.Length < 3)
+                {
+                    return new List<Album>();
+                }
+
+                var variants = new List<string>
+                {
+                    albumTitle,
+                    albumTitle.Length > 10 ? albumTitle.Substring(0, (int)(albumTitle.Length * 0.8)) : albumTitle,
+                    Regex.Replace(albumTitle, @"\s*\(.*?\)\s*", " ").Trim(),
+                };
+
+                foreach (var variant in variants.Where(v => v.Length > 3).Distinct())
+                {
+                    _logger.Debug("Trying fuzzy match for album: {0}", variant);
+                    var results = _albumSearchService.SearchForNewAlbum(variant, artistName);
+                    if (results.Any())
+                    {
+                        _logger.Debug("Fuzzy match found {0} results", results.Count);
+                        return results;
+                    }
+                }
+
+                _logger.Debug("No fuzzy match found for {0}", albumTitle);
+                return new List<Album>();
+            }
+            catch (Exception ex)
+            {
+                _logger.Debug(ex, "Fuzzy match failed for {0}", albumTitle);
+                return new List<Album>();
+            }
         }
     }
 }
