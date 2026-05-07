@@ -3,23 +3,23 @@ using System.Collections.Generic;
 using System.IO.Abstractions;
 using System.Linq;
 using NLog;
+using NzbDrone.Common.Disk;
 using NzbDrone.Common.Instrumentation.Extensions;
-using NzbDrone.Core.Configuration;
+using NzbDrone.Core.Lifecycle;
 using NzbDrone.Core.MediaFiles.TrackImport.Aggregation;
 using NzbDrone.Core.MediaFiles.TrackImport.Identification;
 using NzbDrone.Core.Messaging.Commands;
-using NzbDrone.Core.Music;
+using NzbDrone.Core.Messaging.Events;
 using NzbDrone.Core.Parser.Model;
 using NzbDrone.Core.RootFolders;
 
 namespace NzbDrone.Core.MediaFiles.TrackImport
 {
-    public class AutoRetryFailedImportsOnStartupHandler : IExecute<AutoRetryFailedImportsOnStartupCommand>
+    public class AutoRetryFailedImportsOnStartupHandler : IHandle<ApplicationStartedEvent>
     {
         private readonly IRootFolderService _rootFolderService;
         private readonly IDiskProvider _diskProvider;
         private readonly IAugmentingService _augmentingService;
-        private readonly ITrackGroupingService _trackGroupingService;
         private readonly IIdentificationService _identificationService;
         private readonly IImportApprovedTracks _importApprovedTracks;
         private readonly Logger _logger;
@@ -27,7 +27,6 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
         public AutoRetryFailedImportsOnStartupHandler(IRootFolderService rootFolderService,
                                                        IDiskProvider diskProvider,
                                                        IAugmentingService augmentingService,
-                                                       ITrackGroupingService trackGroupingService,
                                                        IIdentificationService identificationService,
                                                        IImportApprovedTracks importApprovedTracks,
                                                        Logger logger)
@@ -35,13 +34,12 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
             _rootFolderService = rootFolderService;
             _diskProvider = diskProvider;
             _augmentingService = augmentingService;
-            _trackGroupingService = trackGroupingService;
             _identificationService = identificationService;
             _importApprovedTracks = importApprovedTracks;
             _logger = logger;
         }
 
-        public void Execute(AutoRetryFailedImportsOnStartupCommand message)
+        public void Handle(ApplicationStartedEvent message)
         {
             _logger.ProgressInfo("Starting auto-retry of failed imports");
 
