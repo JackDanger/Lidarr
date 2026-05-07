@@ -24,7 +24,7 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
                 "re-evaluated with pre-normalization, fuzzy matching, multi-disc detection, and other improvements. " +
                 "Triggering immediate root folder scan to process pending imports.");
 
-            _commandQueueManager.Push(new RescanFoldersCommand(), CommandTrigger.Manual);
+            _commandQueueManager.Push(new RescanFoldersCommand(), CommandPriority.High);
         }
     }
 }
