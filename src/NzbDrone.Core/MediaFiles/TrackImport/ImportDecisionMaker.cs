@@ -211,6 +211,24 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
             }
         }
 
+        private bool IsLenientForClassical(Rejection rejection)
+        {
+            if (rejection == null)
+            {
+                return false;
+            }
+
+            // For classical music, ignore track count mismatches as classical albums often
+            // have variations in track counts due to different performances/editions
+            var lenientReasons = new[]
+            {
+                "Track count mismatch",
+                "Tracks don't match"
+            };
+
+            return lenientReasons.Any(reason => rejection.Reason.Contains(reason, StringComparison.OrdinalIgnoreCase));
+        }
+
         private Rejection GetCompilationRejection(LocalAlbumRelease localAlbumRelease)
         {
             if (localAlbumRelease.LocalTracks == null || !localAlbumRelease.LocalTracks.Any())
@@ -276,6 +294,13 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
                     .Where(c => c != null);
 
                 decision = new ImportDecision<LocalAlbumRelease>(localAlbumRelease, reasons.ToArray());
+
+                // For classical music, apply more lenient matching criteria
+                if (localAlbumRelease.IsLikelyClassical && decision.Rejections.Any())
+                {
+                    _logger.Debug("Album appears to be classical music, applying lenient matching");
+                    decision = new ImportDecision<LocalAlbumRelease>(localAlbumRelease, reasons.Where(r => !IsLenientForClassical(r)).ToArray());
+                }
             }
 
             if (decision == null)
