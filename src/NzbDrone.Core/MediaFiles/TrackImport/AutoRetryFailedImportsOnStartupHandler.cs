@@ -1,5 +1,4 @@
 using NLog;
-using NzbDrone.Common.Instrumentation.Extensions;
 using NzbDrone.Core.Lifecycle;
 using NzbDrone.Core.Messaging.Events;
 
