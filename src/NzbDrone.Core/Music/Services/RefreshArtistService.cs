@@ -98,6 +98,7 @@ namespace NzbDrone.Core.Music
                 {
                     result.Entity = await Task.FromResult(_artistInfo.GetArtistInfo(local.Metadata.Value.ForeignArtistId, local.MetadataProfileId));
                 }
+
                 result.Metadata = new List<ArtistMetadata> { result.Entity.Metadata.Value };
             }
             catch (ArtistNotFoundException)
