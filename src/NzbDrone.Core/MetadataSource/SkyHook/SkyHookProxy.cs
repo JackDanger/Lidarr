@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using NLog;
 using NzbDrone.Common.Cache;
@@ -479,6 +480,66 @@ namespace NzbDrone.Core.MetadataSource.SkyHook
                 _logger.Warn(ex, ex.Message);
                 throw new SkyHookException("Search by fingerprint failed. Invalid response received from LidarrAPI.");
             }
+        }
+
+        public async Task<List<Album>> EnhancedSearchWithVariantsAsync(string title, string artist)
+        {
+            var searchVariants = GenerateSearchVariants(title);
+
+            foreach (var variant in searchVariants)
+            {
+                try
+                {
+                    var results = await SearchForNewAlbumAsync(variant, artist);
+                    if (results.Any())
+                    {
+                        _logger.Debug("Found results for '{0}' using variant '{1}'", title, variant);
+                        return results;
+                    }
+                }
+                catch (Exception e)
+                {
+                    _logger.Debug(e, "Variant search failed for '{0}': {1}", variant, e.Message);
+                }
+            }
+
+            return new List<Album>();
+        }
+
+        private List<string> GenerateSearchVariants(string title)
+        {
+            var variants = new List<string> { title };
+
+            // Remove remaster/edition markers
+            var remasterPatterns = new[]
+            {
+                @"\(Remaster(ed)?\b[^)]*\)",
+                @"\[Remaster(ed)?\b[^\]]*\]",
+                @"\b(?:Deluxe|Expanded|Extended|Anniversary|Special)\s+Edition\b",
+                @"\b(?:Remaster|Reissue|Re-release)\b",
+                @"\s*-\s*(Remaster|Deluxe|Anniversary|Expanded)",
+                @"\b(Live|Live at|Live from|Live in)\b.*",
+                @"\s*\(Live[^)]*\)",
+                @"\s*\[Live[^\]]*\]"
+            };
+
+            foreach (var pattern in remasterPatterns)
+            {
+                try
+                {
+                    var variant = Regex.Replace(title, pattern, "", RegexOptions.IgnoreCase).Trim();
+                    if (!string.IsNullOrEmpty(variant) && variant != title && !variants.Contains(variant))
+                    {
+                        variants.Add(variant);
+                    }
+                }
+                catch (Exception e)
+                {
+                    _logger.Debug(e, "Error generating variant with pattern '{0}'", pattern);
+                }
+            }
+
+            return variants;
         }
 
         public List<object> SearchForNewEntity(string title)

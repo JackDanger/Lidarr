@@ -14,5 +14,8 @@ namespace NzbDrone.Core.MetadataSource
 
         Task<List<Album>> SearchForNewAlbumByRecordingIdsAsync(List<string> recordingIds) =>
             Task.FromResult(SearchForNewAlbumByRecordingIds(recordingIds));
+
+        Task<List<Album>> EnhancedSearchWithVariantsAsync(string title, string artist) =>
+            SearchForNewAlbumAsync(title, artist);
     }
 }

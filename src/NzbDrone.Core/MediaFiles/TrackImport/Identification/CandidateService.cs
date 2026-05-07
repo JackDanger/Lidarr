@@ -348,6 +348,11 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Identification
                     }
 
                     remoteAlbums = await _albumSearchService.SearchForNewAlbumAsync(albumTag, artistTag);
+
+                    if (remoteAlbums.Count == 0 && albumTag.Length > 5)
+                    {
+                        remoteAlbums = await _albumSearchService.EnhancedSearchWithVariantsAsync(albumTag, artistTag);
+                    }
                 }
             }
             catch (SkyHookException e)
