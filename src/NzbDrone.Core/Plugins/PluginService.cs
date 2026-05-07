@@ -35,6 +35,15 @@ namespace NzbDrone.Core.Plugins
             _installedPlugins = installedPlugins?.ToList() ?? new List<IPlugin>();
         }
 
+        // Backward compatibility constructor for plugins compiled against older versions
+        public PluginService(
+            IHttpClient httpClient,
+            IEnumerable<IPlugin> installedPlugins,
+            Logger logger)
+            : this(httpClient, new NzbDrone.Common.EnvironmentInfo.PlatformInfo(), installedPlugins, logger)
+        {
+        }
+
         private string Framework => $"net{_platformInfo.Version.Major}.0";
 
         public RemotePlugin GetRemotePlugin(string input)
