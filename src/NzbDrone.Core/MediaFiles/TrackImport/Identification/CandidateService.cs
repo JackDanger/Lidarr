@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading.Tasks;
 using NLog;
 using NzbDrone.Common.Extensions;
 using NzbDrone.Core.MetadataSource;
@@ -15,6 +16,7 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Identification
         List<CandidateAlbumRelease> GetDbCandidatesFromTags(LocalAlbumRelease localAlbumRelease, IdentificationOverrides idOverrides, bool includeExisting);
         List<CandidateAlbumRelease> GetDbCandidatesFromFingerprint(LocalAlbumRelease localAlbumRelease, IdentificationOverrides idOverrides, bool includeExisting);
         List<CandidateAlbumRelease> GetRemoteCandidates(LocalAlbumRelease localAlbumRelease);
+        Task<List<CandidateAlbumRelease>> GetRemoteCandidatesAsync(LocalAlbumRelease localAlbumRelease);
     }
 
     public class CandidateService : ICandidateService
@@ -265,6 +267,81 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Identification
                     }
 
                     remoteAlbums = _albumSearchService.SearchForNewAlbum(albumTag, artistTag);
+                }
+            }
+            catch (SkyHookException e)
+            {
+                _logger.Info(e, "Skipping album due to SkyHook error");
+                remoteAlbums = new List<Album>();
+            }
+
+            foreach (var album in remoteAlbums)
+            {
+                // We have to make sure various bits and pieces are populated that are normally handled
+                // by a database lazy load
+                foreach (var release in album.AlbumReleases.Value)
+                {
+                    release.Album = album;
+                    candidates.Add(new CandidateAlbumRelease
+                    {
+                        AlbumRelease = release,
+                        ExistingTracks = new List<TrackFile>()
+                    });
+                }
+            }
+
+            watch.Stop();
+            _logger.Debug($"Getting {candidates.Count} remote candidates from tags for {localAlbumRelease.LocalTracks.Count} tracks took {watch.ElapsedMilliseconds}ms");
+
+            return candidates;
+        }
+
+        public async Task<List<CandidateAlbumRelease>> GetRemoteCandidatesAsync(LocalAlbumRelease localAlbumRelease)
+        {
+            // Gets candidate album releases from the metadata server.
+            // Will eventually need adding locally if we find a match
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+
+            List<Album> remoteAlbums;
+            var candidates = new List<CandidateAlbumRelease>();
+
+            var albumIds = localAlbumRelease.LocalTracks.Select(x => x.FileTrackInfo.AlbumMBId).Distinct().ToList();
+            var recordingIds = localAlbumRelease.LocalTracks.Where(x => x.AcoustIdResults != null).SelectMany(x => x.AcoustIdResults).Distinct().ToList();
+
+            try
+            {
+                if (albumIds.Count == 1 && albumIds[0].IsNotNullOrWhiteSpace())
+                {
+                    // Use mbids in tags if set
+                    remoteAlbums = await _albumSearchService.SearchForNewAlbumAsync($"mbid:{albumIds[0]}", null);
+                }
+                else if (recordingIds.Any())
+                {
+                    // If fingerprints present use those
+                    remoteAlbums = await _albumSearchService.SearchForNewAlbumByRecordingIdsAsync(recordingIds);
+                }
+                else
+                {
+                    // fall back to artist / album name search
+                    string artistTag;
+
+                    if (TrackGroupingService.IsVariousArtists(localAlbumRelease.LocalTracks))
+                    {
+                        artistTag = "Various Artists";
+                    }
+                    else
+                    {
+                        artistTag = localAlbumRelease.LocalTracks.MostCommon(x => x.FileTrackInfo.ArtistTitle) ?? "";
+                    }
+
+                    var albumTag = localAlbumRelease.LocalTracks.MostCommon(x => x.FileTrackInfo.AlbumTitle) ?? "";
+
+                    if (artistTag.IsNullOrWhiteSpace() || albumTag.IsNullOrWhiteSpace())
+                    {
+                        return candidates;
+                    }
+
+                    remoteAlbums = await _albumSearchService.SearchForNewAlbumAsync(albumTag, artistTag);
                 }
             }
             catch (SkyHookException e)

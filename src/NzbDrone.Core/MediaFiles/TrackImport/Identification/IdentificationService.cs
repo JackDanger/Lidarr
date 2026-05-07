@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using Newtonsoft.Json;
 using NLog;
 using NzbDrone.Common;
@@ -120,19 +122,38 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Identification
             // 2 get candidates given specified artist, album and release.  Candidates can include extra files already on disk.
             // 3 find best candidate
             // 4 If best candidate worse than threshold, try fingerprinting
+            return IdentifyAsync(localTracks, idOverrides, config).GetAwaiter().GetResult();
+        }
+
+        private async Task<List<LocalAlbumRelease>> IdentifyAsync(List<LocalTrack> localTracks, IdentificationOverrides idOverrides, ImportDecisionMakerConfig config)
+        {
             var watch = System.Diagnostics.Stopwatch.StartNew();
 
             _logger.Debug("Starting track identification");
 
             var releases = GetLocalAlbumReleases(localTracks, config.SingleRelease);
 
-            var i = 0;
-            foreach (var localRelease in releases)
+            var counter = 0;
+            var semaphore = new SemaphoreSlim(8);
+            var tasks = releases.Select(async localRelease =>
             {
-                i++;
-                _logger.ProgressInfo($"Identifying album {i}/{releases.Count}");
-                IdentifyRelease(localRelease, idOverrides, config);
-            }
+                await semaphore.WaitAsync();
+                try
+                {
+                    var i = Interlocked.Increment(ref counter);
+                    _logger.ProgressInfo($"Identifying album {i}/{releases.Count}");
+                    await IdentifyReleaseAsync(localRelease, idOverrides, config);
+                }
+                catch (Exception e)
+                {
+                    _logger.Error(e, "Identification failed for {0}", localRelease);
+                }
+                finally
+                {
+                    semaphore.Release();
+                }
+            });
+            await Task.WhenAll(tasks);
 
             watch.Stop();
 
@@ -257,6 +278,98 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Identification
                 {
                     var dbCandidates = _candidateService.GetDbCandidatesFromFingerprint(localAlbumRelease, idOverrides, config.IncludeExisting);
                     var remoteCandidates = config.AddNewArtists ? _candidateService.GetRemoteCandidates(localAlbumRelease) : new List<CandidateAlbumRelease>();
+                    var extraCandidates = dbCandidates.Concat(remoteCandidates);
+                    var newCandidates = extraCandidates.ExceptBy(x => x.AlbumRelease.Id, candidateReleases, y => y.AlbumRelease.Id, EqualityComparer<int>.Default);
+                    candidateReleases.AddRange(newCandidates);
+
+                    PopulateTracks(candidateReleases);
+
+                    allLocalTracks.AddRange(ToLocalTrack(newCandidates
+                                                         .SelectMany(x => x.ExistingTracks)
+                                                         .DistinctBy(x => x.Path)
+                                                         .ExceptBy(x => x.Path, allLocalTracks, x => x.Path, PathEqualityComparer.Instance),
+                                                         localAlbumRelease));
+                }
+
+                // fingerprint all the local files in candidates we might be matching against
+                _fingerprintingService.Lookup(allLocalTracks, 0.5);
+
+                GetBestRelease(localAlbumRelease, candidateReleases, allLocalTracks);
+            }
+
+            _logger.Debug($"Best release found in {watch.ElapsedMilliseconds}ms");
+
+            localAlbumRelease.PopulateMatch();
+
+            _logger.Debug($"IdentifyRelease done in {watch.ElapsedMilliseconds}ms");
+        }
+
+        private async Task IdentifyReleaseAsync(LocalAlbumRelease localAlbumRelease, IdentificationOverrides idOverrides, ImportDecisionMakerConfig config)
+        {
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            var fingerprinted = false;
+
+            var candidateReleases = _candidateService.GetDbCandidatesFromTags(localAlbumRelease, idOverrides, config.IncludeExisting);
+
+            if (candidateReleases.Count == 0 && config.AddNewArtists)
+            {
+                candidateReleases = await _candidateService.GetRemoteCandidatesAsync(localAlbumRelease);
+            }
+
+            if (candidateReleases.Count == 0 && FingerprintingAllowed(config.NewDownload))
+            {
+                _logger.Debug("No candidates found, fingerprinting");
+                _fingerprintingService.Lookup(localAlbumRelease.LocalTracks, 0.5);
+                fingerprinted = true;
+                candidateReleases = _candidateService.GetDbCandidatesFromFingerprint(localAlbumRelease, idOverrides, config.IncludeExisting);
+
+                if (candidateReleases.Count == 0 && config.AddNewArtists)
+                {
+                    // Now fingerprints are populated this will return a different answer
+                    candidateReleases = await _candidateService.GetRemoteCandidatesAsync(localAlbumRelease);
+                }
+            }
+
+            if (candidateReleases.Count == 0)
+            {
+                // can't find any candidates even after fingerprinting
+                // populate the overrides and return
+                foreach (var localTrack in localAlbumRelease.LocalTracks)
+                {
+                    localTrack.Release = idOverrides.AlbumRelease;
+                    localTrack.Album = idOverrides.Album;
+                    localTrack.Artist = idOverrides.Artist;
+                }
+
+                return;
+            }
+
+            _logger.Debug($"Got {candidateReleases.Count} candidates for {localAlbumRelease.LocalTracks.Count} tracks in {watch.ElapsedMilliseconds}ms");
+
+            PopulateTracks(candidateReleases);
+
+            // convert all the TrackFiles that represent extra files to List<LocalTrack>
+            var allLocalTracks = ToLocalTrack(candidateReleases
+                                              .SelectMany(x => x.ExistingTracks)
+                                              .DistinctBy(x => x.Path), localAlbumRelease);
+
+            _logger.Debug($"Retrieved {allLocalTracks.Count} possible tracks in {watch.ElapsedMilliseconds}ms");
+
+            GetBestRelease(localAlbumRelease, candidateReleases, allLocalTracks);
+
+            // If result isn't great and we haven't fingerprinted, try that
+            // Note that this can improve the match even if we try the same candidates
+            if (!fingerprinted && FingerprintingAllowed(config.NewDownload) && ShouldFingerprint(localAlbumRelease))
+            {
+                _logger.Debug($"Match not good enough, fingerprinting");
+                _fingerprintingService.Lookup(localAlbumRelease.LocalTracks, 0.5);
+
+                // Only include extra possible candidates if neither album nor release are specified
+                // Will generally be specified as part of manual import
+                if (idOverrides?.Album == null && idOverrides?.AlbumRelease == null)
+                {
+                    var dbCandidates = _candidateService.GetDbCandidatesFromFingerprint(localAlbumRelease, idOverrides, config.IncludeExisting);
+                    var remoteCandidates = config.AddNewArtists ? await _candidateService.GetRemoteCandidatesAsync(localAlbumRelease) : new List<CandidateAlbumRelease>();
                     var extraCandidates = dbCandidates.Concat(remoteCandidates);
                     var newCandidates = extraCandidates.ExceptBy(x => x.AlbumRelease.Id, candidateReleases, y => y.AlbumRelease.Id, EqualityComparer<int>.Default);
                     candidateReleases.AddRange(newCandidates);

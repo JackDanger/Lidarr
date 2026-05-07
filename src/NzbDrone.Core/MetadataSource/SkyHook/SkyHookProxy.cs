@@ -371,6 +371,116 @@ namespace NzbDrone.Core.MetadataSource.SkyHook
             }
         }
 
+        public async Task<List<Album>> SearchForNewAlbumAsync(string title, string artist)
+        {
+            try
+            {
+                var lowerTitle = title.ToLowerInvariant();
+
+                if (IsMbidQuery(lowerTitle))
+                {
+                    var slug = lowerTitle.Split(':')[1].Trim();
+
+                    var isValid = Guid.TryParse(slug, out var searchGuid);
+
+                    if (slug.IsNullOrWhiteSpace() || slug.Any(char.IsWhiteSpace) || isValid == false)
+                    {
+                        return new List<Album>();
+                    }
+
+                    try
+                    {
+                        var existingAlbum = _albumService.FindById(searchGuid.ToString());
+
+                        if (existingAlbum == null)
+                        {
+                            var data = GetAlbumInfo(searchGuid.ToString());
+                            var album = data.Item2;
+                            album.Artist = _artistService.FindById(data.Item1) ?? new Artist
+                            {
+                                Metadata = data.Item3.Single(x => x.ForeignArtistId == data.Item1)
+                            };
+
+                            return new List<Album> { album };
+                        }
+
+                        existingAlbum.Artist = _artistService.GetArtist(existingAlbum.ArtistId);
+                        return new List<Album> { existingAlbum };
+                    }
+                    catch (AlbumNotFoundException)
+                    {
+                        return new List<Album>();
+                    }
+                }
+
+                var httpRequest = _requestBuilder.GetRequestBuilder().Create()
+                                    .SetSegment("route", "search")
+                                    .AddQueryParam("type", "album")
+                                    .AddQueryParam("query", title.ToLower().Trim())
+                                    .AddQueryParam("artist", artist.IsNotNullOrWhiteSpace() ? artist.ToLower().Trim() : string.Empty)
+                                    .AddQueryParam("includeTracks", "1")
+                                    .Build();
+
+                var httpResponse = await _httpClient.GetAsync<List<AlbumResource>>(httpRequest);
+
+                return httpResponse.Resource.Select(MapSearchResult)
+                    .Where(x => x != null)
+                    .ToList();
+            }
+            catch (HttpException ex)
+            {
+                if (ex.Response != null && ex.Response.StatusCode == HttpStatusCode.ServiceUnavailable)
+                {
+                    throw new SkyHookException("Search for '{0}' failed. LidarrAPI Temporarily Unavailable (503)", title);
+                }
+
+                throw new SkyHookException("Search for '{0}' failed. Unable to communicate with LidarrAPI. {1}", ex, title, ex.Message);
+            }
+            catch (SkyHookException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.Warn(ex, ex.Message);
+                throw new SkyHookException("Search for '{0}' failed. Invalid response received from LidarrAPI.", title);
+            }
+        }
+
+        public async Task<List<Album>> SearchForNewAlbumByRecordingIdsAsync(List<string> recordingIds)
+        {
+            try
+            {
+                var ids = recordingIds.Where(x => x.IsNotNullOrWhiteSpace()).Distinct();
+                var httpRequest = _requestBuilder.GetRequestBuilder().Create()
+                    .SetSegment("route", "search/fingerprint")
+                    .Build();
+
+                httpRequest.SetContent(ids.ToJson());
+                httpRequest.Headers.ContentType = "application/json";
+
+                var httpResponse = await _httpClient.PostAsync<List<AlbumResource>>(httpRequest);
+
+                return httpResponse.Resource.Select(MapSearchResult)
+                    .Where(x => x != null)
+                    .ToList();
+            }
+            catch (HttpException ex)
+            {
+                if (ex.Response != null && ex.Response.StatusCode == HttpStatusCode.ServiceUnavailable)
+                {
+                    throw new SkyHookException("Search by fingerprint failed. LidarrAPI Temporarily Unavailable (503)");
+                }
+
+                throw new SkyHookException("Search by fingerprint failed. Unable to communicate with LidarrAPI. {0}", ex, ex.Message);
+            }
+            catch (Exception ex) when (ex is not SkyHookException)
+            {
+                _logger.Warn(ex, ex.Message);
+                throw new SkyHookException("Search by fingerprint failed. Invalid response received from LidarrAPI.");
+            }
+        }
+
         public List<object> SearchForNewEntity(string title)
         {
             var lowerTitle = title.ToLowerInvariant();
