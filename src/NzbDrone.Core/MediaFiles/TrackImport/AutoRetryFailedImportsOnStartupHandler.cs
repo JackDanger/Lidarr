@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.IO.Abstractions;
 using System.Linq;
 using NLog;
 using NzbDrone.Common.Disk;
@@ -8,7 +7,6 @@ using NzbDrone.Common.Instrumentation.Extensions;
 using NzbDrone.Core.Lifecycle;
 using NzbDrone.Core.MediaFiles.TrackImport.Aggregation;
 using NzbDrone.Core.MediaFiles.TrackImport.Identification;
-using NzbDrone.Core.Messaging.Commands;
 using NzbDrone.Core.Messaging.Events;
 using NzbDrone.Core.Parser.Model;
 using NzbDrone.Core.RootFolders;
@@ -61,7 +59,7 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
                     _logger.Debug("Auto-retrying imports for root folder: {0}", rootFolder.Path);
 
                     var mediaFiles = _diskProvider.GetFiles(rootFolder.Path, recursive: true)
-                        .Where(f => MediaFileExtensions.MediaFileExtensions.Extensions.Contains(System.IO.Path.GetExtension(f)))
+                        .Where(f => MediaFileExtensions.Extensions.Contains(System.IO.Path.GetExtension(f)))
                         .ToList();
 
                     if (!mediaFiles.Any())
@@ -118,7 +116,7 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
                     // Filter for high-confidence matches
                     var highConfidenceMatches = identified
                         .Where(x => x.AlbumRelease != null &&
-                                   x.Distance.NormalizedDistance < 0.15) // 85%+ confidence
+                                   x.Distance.NormalizedDistance() < 0.15) // 85%+ confidence
                         .ToList();
 
                     totalRetried += mediaFiles.Count;
@@ -126,8 +124,10 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
 
                     if (highConfidenceMatches.Any())
                     {
-                        _logger.Info("Auto-importing {0} high-confidence matches from {1}",
-                                    highConfidenceMatches.Count, rootFolder.Path);
+                        _logger.Info(
+                            "Auto-importing {0} high-confidence matches from {1}",
+                            highConfidenceMatches.Count,
+                            rootFolder.Path);
 
                         try
                         {
@@ -145,8 +145,10 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
                 }
             }
 
-            _logger.ProgressInfo("Auto-retry of failed imports completed. Retried: {0}, Imported: {1}",
-                                totalRetried, totalImported);
+            _logger.ProgressInfo(
+                "Auto-retry of failed imports completed. Retried: {0}, Imported: {1}",
+                totalRetried,
+                totalImported);
         }
     }
 }
