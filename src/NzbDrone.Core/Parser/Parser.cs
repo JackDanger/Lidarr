@@ -426,6 +426,7 @@ namespace NzbDrone.Core.Parser
                 Logger.Debug("Parsing string '{0}'", title);
 
                 var releaseTitle = RemoveFileExtension(title);
+                releaseTitle = PreNormalizeAlbumTitle(releaseTitle);
 
                 var simpleTitle = SimpleTitleRegex.Replace(releaseTitle);
 
@@ -509,6 +510,23 @@ namespace NzbDrone.Core.Parser
 
             Logger.Debug("Unable to parse {0}", title);
             return null;
+        }
+
+        private static string PreNormalizeAlbumTitle(string title)
+        {
+            if (title.IsNullOrWhiteSpace())
+            {
+                return title;
+            }
+
+            title = Regex.Replace(title, @"\b(?:Box\s*Set|Discography)\b", "", RegexOptions.IgnoreCase);
+            title = Regex.Replace(title, @"^\[.*?\]\s*", "");
+            title = Regex.Replace(title, @"^(\d{4})\.\s+", "");
+            title = Regex.Replace(title, @"^(\d{4})\s*-\s+", "");
+            title = Regex.Replace(title, @"\s*\[[^\]]*(?:FLAC|MP3|Blu-?ray|16-44|24-96)\][^\]]*$", "");
+            title = Regex.Replace(title, @"\s*\(\s*(?:lossy|format|quality)\s*\)\s*$", "", RegexOptions.IgnoreCase);
+
+            return title.Trim();
         }
 
         public static string CleanArtistName(this string name)
