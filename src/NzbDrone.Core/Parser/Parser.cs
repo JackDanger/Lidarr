@@ -526,7 +526,9 @@ namespace NzbDrone.Core.Parser
             title = Regex.Replace(title, @"\s*\[[^\]]*(?:FLAC|MP3|Blu-?ray|16-44|24-96)\][^\]]*$", "");
             title = Regex.Replace(title, @"\s*\(\s*(?:lossy|format|quality)\s*\)\s*$", "", RegexOptions.IgnoreCase);
 
-            return title.Trim();
+            title = title.Trim();
+
+            return title;
         }
 
         public static string CleanArtistName(this string name)
@@ -549,6 +551,25 @@ namespace NzbDrone.Core.Parser
             title = DuplicateSpacesRegex.Replace(title, " ");
 
             return title.Trim().ToLower();
+        }
+
+        public static bool IsLiveAlbum(string releaseTitle)
+        {
+            if (releaseTitle.IsNullOrWhiteSpace())
+            {
+                return false;
+            }
+
+            var livePatterns = new[]
+            {
+                "live at",
+                "live in",
+                "live from",
+                "live recorded"
+            };
+
+            var lower = releaseTitle.ToLower();
+            return livePatterns.Any(p => lower.Contains(p));
         }
 
         public static string NormalizeTitle(string title)
