@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO.Abstractions;
 using System.Linq;
+using System.Text.RegularExpressions;
 using NLog;
 using NzbDrone.Common.Extensions;
 using NzbDrone.Common.Instrumentation.Extensions;
@@ -210,11 +211,62 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
             }
         }
 
+        private Rejection GetCompilationRejection(LocalAlbumRelease localAlbumRelease)
+        {
+            if (localAlbumRelease.LocalTracks == null || !localAlbumRelease.LocalTracks.Any())
+            {
+                return null;
+            }
+
+            try
+            {
+                var path = System.IO.Path.GetDirectoryName(localAlbumRelease.LocalTracks.First().Path);
+                if (string.IsNullOrEmpty(path))
+                {
+                    return null;
+                }
+
+                var folderName = System.IO.Path.GetFileName(path).ToLower();
+
+                // Detect discography, compilation, and anthology patterns
+                var compilationPatterns = new[]
+                {
+                    @"\bdiscograph",
+                    @"\boriginal\s+album",
+                    @"\bessentials?",
+                    @"\bbox\s+set",
+                    @"\bcollection",
+                    @"\banthology",
+                    @"\bcompilat"
+                };
+
+                foreach (var pattern in compilationPatterns)
+                {
+                    if (Regex.IsMatch(folderName, pattern))
+                    {
+                        return new Rejection("Appears to be a discography/compilation (multiple albums), not a single release");
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                _logger.Error(e, "Error checking for compilation patterns in {0}", localAlbumRelease);
+            }
+
+            return null;
+        }
+
         private ImportDecision<LocalAlbumRelease> GetDecision(LocalAlbumRelease localAlbumRelease, DownloadClientItem downloadClientItem)
         {
             ImportDecision<LocalAlbumRelease> decision = null;
 
-            if (localAlbumRelease.AlbumRelease == null)
+            // Check for compilation/discography patterns first
+            var compilationRejection = GetCompilationRejection(localAlbumRelease);
+            if (compilationRejection != null)
+            {
+                decision = new ImportDecision<LocalAlbumRelease>(localAlbumRelease, compilationRejection);
+            }
+            else if (localAlbumRelease.AlbumRelease == null)
             {
                 decision = new ImportDecision<LocalAlbumRelease>(localAlbumRelease, new Rejection($"Couldn't find similar album for {localAlbumRelease}"));
             }
