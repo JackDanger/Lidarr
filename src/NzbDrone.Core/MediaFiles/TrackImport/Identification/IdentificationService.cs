@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
@@ -256,6 +257,19 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Identification
 
             PopulateTracks(candidateReleases);
 
+            if (IsMultiDiscAlbum(localAlbumRelease))
+            {
+                var multiDiscCandidates = candidateReleases
+                    .Where(x => EstimateDiscCount(x.AlbumRelease) > 1)
+                    .ToList();
+
+                if (multiDiscCandidates.Any())
+                {
+                    _logger.Debug("Filtering to multi-disc candidates: {0} of {1}", multiDiscCandidates.Count, candidateReleases.Count);
+                    candidateReleases = multiDiscCandidates;
+                }
+            }
+
             // convert all the TrackFiles that represent extra files to List<LocalTrack>
             var allLocalTracks = ToLocalTrack(candidateReleases
                                               .SelectMany(x => x.ExistingTracks)
@@ -347,6 +361,19 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Identification
             _logger.Debug($"Got {candidateReleases.Count} candidates for {localAlbumRelease.LocalTracks.Count} tracks in {watch.ElapsedMilliseconds}ms");
 
             PopulateTracks(candidateReleases);
+
+            if (IsMultiDiscAlbum(localAlbumRelease))
+            {
+                var multiDiscCandidates = candidateReleases
+                    .Where(x => EstimateDiscCount(x.AlbumRelease) > 1)
+                    .ToList();
+
+                if (multiDiscCandidates.Any())
+                {
+                    _logger.Debug("Filtering to multi-disc candidates: {0} of {1}", multiDiscCandidates.Count, candidateReleases.Count);
+                    candidateReleases = multiDiscCandidates;
+                }
+            }
 
             // convert all the TrackFiles that represent extra files to List<LocalTrack>
             var allLocalTracks = ToLocalTrack(candidateReleases
@@ -457,6 +484,34 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Identification
 
             watch.Stop();
             _logger.Debug($"Best release: {localAlbumRelease.AlbumRelease} Distance {localAlbumRelease.Distance.NormalizedDistance()} found in {watch.ElapsedMilliseconds}ms");
+        }
+
+        private static bool IsMultiDiscAlbum(LocalAlbumRelease localAlbumRelease)
+        {
+            if (localAlbumRelease?.LocalTracks == null || !localAlbumRelease.LocalTracks.Any())
+            {
+                return false;
+            }
+
+            var folderName = System.IO.Path.GetDirectoryName(localAlbumRelease.LocalTracks.First().Path);
+            if (folderName.IsNullOrWhiteSpace())
+            {
+                return false;
+            }
+
+            var multiDiscPattern = new Regex(@"\((\d+)\s*CDs?\)|\((\d+)CD\s*Box", RegexOptions.IgnoreCase);
+            return multiDiscPattern.IsMatch(folderName);
+        }
+
+        private static int EstimateDiscCount(AlbumRelease release)
+        {
+            if (release?.Tracks?.Value == null || !release.Tracks.Value.Any())
+            {
+                return 1;
+            }
+
+            var maxMediumNumber = release.Tracks.Value.Max(t => t.MediumNumber);
+            return Math.Max(1, maxMediumNumber);
         }
 
         public TrackMapping MapReleaseTracks(List<LocalTrack> localTracks, List<Track> mbTracks)
