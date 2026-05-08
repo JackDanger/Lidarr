@@ -219,11 +219,14 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
             }
 
             // For classical music, ignore track count mismatches as classical albums often
-            // have variations in track counts due to different performances/editions
+            // have variations in track counts due to different performances/editions.
+            // Also apply leniency for "unmatched tracks" when most tracks do match—
+            // a few extra/bonus tracks shouldn't block importing the core album.
             var lenientReasons = new[]
             {
                 "Track count mismatch",
-                "Tracks don't match"
+                "Tracks don't match",
+                "Has unmatched tracks"
             };
 
             return lenientReasons.Any(reason => rejection.Reason.Contains(reason, StringComparison.OrdinalIgnoreCase));
@@ -325,6 +328,15 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
                     .Where(c => c != null);
 
                 decision = new ImportDecision<LocalAlbumRelease>(localAlbumRelease, reasons.ToArray());
+
+                // Apply lenient matching: allow unmatched tracks if most tracks do match
+                // (bonus tracks, live recordings, etc shouldn't block importing the core album)
+                var hasUnmatchedTracksError = decision.Rejections.Any(r => r.Reason.Contains("Has unmatched tracks", StringComparison.OrdinalIgnoreCase));
+                if (hasUnmatchedTracksError && decision.Rejections.Count == 1)
+                {
+                    _logger.Debug("Album has unmatched tracks but matched release found, allowing import of core album");
+                    decision = new ImportDecision<LocalAlbumRelease>(localAlbumRelease, Array.Empty<Rejection>());
+                }
 
                 // For classical music, apply more lenient matching criteria
                 if (localAlbumRelease.IsLikelyClassical && decision.Rejections.Any())
