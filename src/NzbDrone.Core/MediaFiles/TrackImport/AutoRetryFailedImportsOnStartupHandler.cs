@@ -1,8 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using NLog;
 using Newtonsoft.Json;
+using NLog;
 using NzbDrone.Core.Lifecycle;
 using NzbDrone.Core.MediaFiles.Commands;
 using NzbDrone.Core.MediaFiles.TrackImport.Manual;
@@ -45,7 +45,7 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
                     try
                     {
                         // Push back to queue with high priority to execute early with improved logic
-                        _commandQueueManager.Push(manualImportCmd, CommandPriority.High);
+                        _commandQueueManager.Push<ManualImportCommand>(manualImportCmd, CommandPriority.High);
                         _logger.Debug("Re-queued manual import for reprocessing with improved logic");
                     }
                     catch (Exception ex)
