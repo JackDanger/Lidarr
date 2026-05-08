@@ -211,22 +211,50 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
             }
         }
 
-        private bool IsLenientForClassical(Rejection rejection)
+        private bool IsTrackCountMismatch(Rejection rejection)
         {
             if (rejection == null)
             {
                 return false;
             }
 
-            // For classical music, ignore track count mismatches as classical albums often
-            // have variations in track counts due to different performances/editions
-            var lenientReasons = new[]
+            var trackMismatchReasons = new[]
             {
                 "Track count mismatch",
                 "Tracks don't match"
             };
 
-            return lenientReasons.Any(reason => rejection.Reason.Contains(reason, StringComparison.OrdinalIgnoreCase));
+            return trackMismatchReasons.Any(reason => rejection.Reason.Contains(reason, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private bool ShouldApplyTrackCountLeniency(LocalAlbumRelease localAlbumRelease)
+        {
+            // Apply track count leniency for classical music
+            if (localAlbumRelease.IsLikelyClassical)
+            {
+                return true;
+            }
+
+            // Also apply to albums with high track match ratio (>70% matching tracks)
+            // This handles cases like 20 of 23 tracks matching (album variant/edition case)
+            if (localAlbumRelease.AlbumRelease?.Tracks != null && localAlbumRelease.LocalTracks != null)
+            {
+                var releaseTrackCount = localAlbumRelease.AlbumRelease.Tracks.Count;
+                var matchedTracks = localAlbumRelease.TrackMapping?.Mapping?.Count ?? 0;
+
+                if (releaseTrackCount > 0 && matchedTracks > 0)
+                {
+                    var matchRatio = (double)matchedTracks / releaseTrackCount;
+                    if (matchRatio >= 0.70)
+                    {
+                        _logger.Debug("Album has {0}/{1} matching tracks ({2:P}), applying track count leniency",
+                            matchedTracks, releaseTrackCount, matchRatio);
+                        return true;
+                    }
+                }
+            }
+
+            return false;
         }
 
         private bool HasAlbumSubfolders(string parentPath)
@@ -335,11 +363,11 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
 
                 decision = new ImportDecision<LocalAlbumRelease>(localAlbumRelease, reasons.ToArray());
 
-                // For classical music, apply more lenient matching criteria
-                if (localAlbumRelease.IsLikelyClassical && decision.Rejections.Any())
+                // Apply lenient track count matching for classical music and high-match-ratio albums
+                if (ShouldApplyTrackCountLeniency(localAlbumRelease) && decision.Rejections.Any())
                 {
-                    _logger.Debug("Album appears to be classical music, applying lenient matching");
-                    decision = new ImportDecision<LocalAlbumRelease>(localAlbumRelease, reasons.Where(r => !IsLenientForClassical(r)).ToArray());
+                    _logger.Debug("Applying lenient track count matching for album");
+                    decision = new ImportDecision<LocalAlbumRelease>(localAlbumRelease, reasons.Where(r => !IsTrackCountMismatch(r)).ToArray());
                 }
             }
 
