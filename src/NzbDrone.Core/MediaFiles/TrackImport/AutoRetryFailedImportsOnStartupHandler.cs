@@ -59,9 +59,9 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
             _logger.Info("Triggering root folder scan to identify any unmatched files with improved logic.");
             _commandQueueManager.Push(new RescanFoldersCommand(), CommandPriority.High);
 
-            // Also trigger check for failed downloads that need to be re-imported with improved logic
-            _logger.Info("Triggering re-check of failed downloads to retry with improved matching.");
-            _commandQueueManager.Push(new CheckForFinishedDownloadCommand(), CommandPriority.High);
+            // Also trigger refresh of monitored downloads to re-import failed items with improved logic
+            _logger.Info("Triggering refresh of monitored downloads to retry failed imports with improved matching.");
+            _commandQueueManager.Push(new RefreshMonitoredDownloadsCommand(), CommandPriority.High);
         }
 
         private List<ManualImportCommand> GetPendingManualImports()
