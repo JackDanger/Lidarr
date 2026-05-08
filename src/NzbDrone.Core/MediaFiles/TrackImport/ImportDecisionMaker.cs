@@ -229,6 +229,33 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
             return lenientReasons.Any(reason => rejection.Reason.Contains(reason, StringComparison.OrdinalIgnoreCase));
         }
 
+        private bool HasAlbumSubfolders(string parentPath)
+        {
+            try
+            {
+                var directoryInfo = new System.IO.DirectoryInfo(parentPath);
+                if (!directoryInfo.Exists)
+                {
+                    return false;
+                }
+
+                var subdirs = directoryInfo.GetDirectories();
+                if (!subdirs.Any())
+                {
+                    return false;
+                }
+
+                // Look for album subfolder patterns: "YYYY - Album Name" or similar
+                var albumFolderPattern = @"^\d{4}\s*-\s*\w";
+
+                return subdirs.Any(d => Regex.IsMatch(d.Name, albumFolderPattern));
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         private Rejection GetCompilationRejection(LocalAlbumRelease localAlbumRelease)
         {
             if (localAlbumRelease.LocalTracks == null || !localAlbumRelease.LocalTracks.Any())
@@ -246,13 +273,23 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
 
                 var folderName = System.IO.Path.GetFileName(path).ToLower();
 
-                // Detect discography, compilation, and anthology patterns
+                // Detect discography pattern separately - if it has album subfolders, skip rejection
+                if (Regex.IsMatch(folderName, @"\bdiscograph"))
+                {
+                    if (HasAlbumSubfolders(path))
+                    {
+                        _logger.Debug("Discography folder contains album subfolders, allowing recursive processing: {0}", path);
+                        return null;
+                    }
+
+                    return new Rejection("Appears to be a discography (multiple albums), not a single release");
+                }
+
+                // Detect other compilation patterns (but NOT box sets, which are single releases)
                 var compilationPatterns = new[]
                 {
-                    @"\bdiscograph",
                     @"\boriginal\s+album",
                     @"\bessentials?",
-                    @"\bbox\s+set",
                     @"\bcollection",
                     @"\banthology",
                     @"\bcompilat"
@@ -262,7 +299,7 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
                 {
                     if (Regex.IsMatch(folderName, pattern))
                     {
-                        return new Rejection("Appears to be a discography/compilation (multiple albums), not a single release");
+                        return new Rejection("Appears to be a compilation (multiple albums), not a single release");
                     }
                 }
             }
