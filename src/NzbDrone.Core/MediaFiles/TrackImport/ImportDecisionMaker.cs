@@ -227,6 +227,31 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
             return trackMismatchReasons.Any(reason => rejection.Reason.Contains(reason, StringComparison.OrdinalIgnoreCase));
         }
 
+        private bool IsPartialImportWithAllDatabaseTracks(LocalAlbumRelease localAlbumRelease)
+        {
+            // Detect if local tracks include all database tracks plus additional ones
+            // This is a legitimate import scenario: "we found all the songs from the album plus some extra tracks"
+            if (localAlbumRelease.AlbumRelease?.Tracks == null || localAlbumRelease.TrackMapping?.Mapping == null)
+            {
+                return false;
+            }
+
+            var databaseTracks = localAlbumRelease.AlbumRelease.Tracks.Count;
+            var mappedTracks = localAlbumRelease.TrackMapping.Mapping.Count;
+            var localTracks = localAlbumRelease.LocalTracks?.Count ?? 0;
+
+            // If all DB tracks are mapped and we have extra local tracks beyond DB track count
+            if (mappedTracks == databaseTracks && localTracks > databaseTracks)
+            {
+                var extraTracks = localTracks - databaseTracks;
+                _logger.Debug("Detected partial import: {0} database tracks all found, plus {1} extra local tracks",
+                    databaseTracks, extraTracks);
+                return true;
+            }
+
+            return false;
+        }
+
         private bool ShouldApplyTrackCountLeniency(LocalAlbumRelease localAlbumRelease)
         {
             // Apply track count leniency for classical music
@@ -362,6 +387,13 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
                     .Where(c => c != null);
 
                 decision = new ImportDecision<LocalAlbumRelease>(localAlbumRelease, reasons.ToArray());
+
+                // Allow partial imports where all database tracks are found plus extras
+                if (IsPartialImportWithAllDatabaseTracks(localAlbumRelease) && decision.Rejections.Any())
+                {
+                    _logger.Debug("Partial import detected: all database tracks found with additional local tracks");
+                    decision = new ImportDecision<LocalAlbumRelease>(localAlbumRelease, reasons.Where(r => !IsTrackCountMismatch(r)).ToArray());
+                }
 
                 // Apply lenient track count matching for classical music and high-match-ratio albums
                 if (ShouldApplyTrackCountLeniency(localAlbumRelease) && decision.Rejections.Any())
