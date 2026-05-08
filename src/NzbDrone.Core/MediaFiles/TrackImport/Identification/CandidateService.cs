@@ -391,11 +391,20 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Identification
                     return new List<Album>();
                 }
 
+                // Generate increasingly aggressive fuzzy match variants
                 var variants = new List<string>
                 {
                     albumTitle,
-                    albumTitle.Length > 10 ? albumTitle.Substring(0, (int)(albumTitle.Length * 0.8)) : albumTitle,
+                    // Remove parenthetical content (live recordings, edition markers)
                     Regex.Replace(albumTitle, @"\s*\(.*?\)\s*", " ").Trim(),
+                    // Remove edition/variant markers (REMASTER, DELUXE, SPECIAL EDITION, etc)
+                    Regex.Replace(albumTitle, @"\b(remaster|deluxe|special|expanded|anniversary|edition|version|remix|radio|clean|explicit|acoustic)\b", " ", RegexOptions.IgnoreCase).Trim(),
+                    // Remove leading year pattern (YYYY - Album becomes Album)
+                    Regex.Replace(albumTitle, @"^\d{4}\s*-\s*", "").Trim(),
+                    // 80% truncation for long names (handles truncated tags)
+                    albumTitle.Length > 10 ? albumTitle.Substring(0, (int)(albumTitle.Length * 0.8)) : albumTitle,
+                    // Combine: no parentheticals AND no edition markers
+                    Regex.Replace(Regex.Replace(albumTitle, @"\s*\(.*?\)\s*", " "), @"\b(remaster|deluxe|special|expanded|anniversary|edition|version|remix|radio|clean|explicit|acoustic)\b", " ", RegexOptions.IgnoreCase).Trim(),
                 };
 
                 foreach (var variant in variants.Where(v => v.Length > 3).Distinct())
@@ -404,12 +413,24 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Identification
                     var results = _albumSearchService.SearchForNewAlbum(variant, artistName);
                     if (results.Any())
                     {
-                        _logger.Debug("Fuzzy match found {0} results", results.Count);
+                        _logger.Debug("Fuzzy match found {0} results for variant: {1}", results.Count, variant);
                         return results;
                     }
                 }
 
-                _logger.Debug("No fuzzy match found for {0}", albumTitle);
+                // Final fallback: try searching by artist alone if album title yields nothing
+                if (!artistName.IsNullOrWhiteSpace())
+                {
+                    _logger.Debug("No fuzzy match found for album '{0}', trying artist-only search for '{1}'", albumTitle, artistName);
+                    var artistResults = _albumSearchService.SearchForNewAlbum("", artistName);
+                    if (artistResults.Any())
+                    {
+                        _logger.Debug("Artist-only search found {0} albums", artistResults.Count);
+                        return artistResults;
+                    }
+                }
+
+                _logger.Debug("No fuzzy match found for {0} by {1}", albumTitle, artistName);
                 return new List<Album>();
             }
             catch (Exception ex)
