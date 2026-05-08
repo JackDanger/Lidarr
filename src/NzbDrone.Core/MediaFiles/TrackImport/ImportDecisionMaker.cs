@@ -211,102 +211,22 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
             }
         }
 
-        private bool IsTrackCountMismatch(Rejection rejection)
+        private bool IsLenientForClassical(Rejection rejection)
         {
             if (rejection == null)
             {
                 return false;
             }
 
-            var trackMismatchReasons = new[]
+            // For classical music, ignore track count mismatches as classical albums often
+            // have variations in track counts due to different performances/editions
+            var lenientReasons = new[]
             {
                 "Track count mismatch",
                 "Tracks don't match"
             };
 
-            return trackMismatchReasons.Any(reason => rejection.Reason.Contains(reason, StringComparison.OrdinalIgnoreCase));
-        }
-
-        private bool IsPartialImportWithAllDatabaseTracks(LocalAlbumRelease localAlbumRelease)
-        {
-            // Detect if local tracks include all database tracks plus additional ones
-            // This is a legitimate import scenario: "we found all the songs from the album plus some extra tracks"
-            if (localAlbumRelease.AlbumRelease?.Tracks == null || localAlbumRelease.TrackMapping?.Mapping == null)
-            {
-                return false;
-            }
-
-            var databaseTracks = localAlbumRelease.AlbumRelease.Tracks.Count;
-            var mappedTracks = localAlbumRelease.TrackMapping.Mapping.Count;
-            var localTracks = localAlbumRelease.LocalTracks?.Count ?? 0;
-
-            // If all DB tracks are mapped and we have extra local tracks beyond DB track count
-            if (mappedTracks == databaseTracks && localTracks > databaseTracks)
-            {
-                var extraTracks = localTracks - databaseTracks;
-                _logger.Debug("Detected partial import: {0} database tracks all found, plus {1} extra local tracks",
-                    databaseTracks, extraTracks);
-                return true;
-            }
-
-            return false;
-        }
-
-        private bool ShouldApplyTrackCountLeniency(LocalAlbumRelease localAlbumRelease)
-        {
-            // Apply track count leniency for classical music
-            if (localAlbumRelease.IsLikelyClassical)
-            {
-                return true;
-            }
-
-            // Also apply to albums with high track match ratio (>70% matching tracks)
-            // This handles cases like 20 of 23 tracks matching (album variant/edition case)
-            if (localAlbumRelease.AlbumRelease?.Tracks != null && localAlbumRelease.LocalTracks != null)
-            {
-                var releaseTrackCount = localAlbumRelease.AlbumRelease.Tracks.Count;
-                var matchedTracks = localAlbumRelease.TrackMapping?.Mapping?.Count ?? 0;
-
-                if (releaseTrackCount > 0 && matchedTracks > 0)
-                {
-                    var matchRatio = (double)matchedTracks / releaseTrackCount;
-                    if (matchRatio >= 0.70)
-                    {
-                        _logger.Debug("Album has {0}/{1} matching tracks ({2:P}), applying track count leniency",
-                            matchedTracks, releaseTrackCount, matchRatio);
-                        return true;
-                    }
-                }
-            }
-
-            return false;
-        }
-
-        private bool HasAlbumSubfolders(string parentPath)
-        {
-            try
-            {
-                var directoryInfo = new System.IO.DirectoryInfo(parentPath);
-                if (!directoryInfo.Exists)
-                {
-                    return false;
-                }
-
-                var subdirs = directoryInfo.GetDirectories();
-                if (!subdirs.Any())
-                {
-                    return false;
-                }
-
-                // Look for album subfolder patterns: "YYYY - Album Name" or similar
-                var albumFolderPattern = @"^\d{4}\s*-\s*\w";
-
-                return subdirs.Any(d => Regex.IsMatch(d.Name, albumFolderPattern));
-            }
-            catch
-            {
-                return false;
-            }
+            return lenientReasons.Any(reason => rejection.Reason.Contains(reason, StringComparison.OrdinalIgnoreCase));
         }
 
         private Rejection GetCompilationRejection(LocalAlbumRelease localAlbumRelease)
@@ -326,22 +246,40 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
 
                 var folderName = System.IO.Path.GetFileName(path).ToLower();
 
-                // Detect discography pattern separately - if it has album subfolders, skip rejection
+                // Skip box sets and multi-disc albums - these are single releases with multiple discs
+                if (Regex.IsMatch(folderName, @"\bbox\s+set|\bcd\s*\d+|-CD\d|-cd\d|(\d+).*cd(s)?|multi.?cd|multi.?disc"))
+                {
+                    _logger.Debug("Skipping compilation check for box set/multi-disc album: {0}", folderName);
+                    return null;
+                }
+
+                // Check for discography pattern
                 if (Regex.IsMatch(folderName, @"\bdiscograph"))
                 {
-                    if (HasAlbumSubfolders(path))
+                    // If it contains album subfolders (YYYY - Album pattern), skip rejection
+                    try
                     {
-                        _logger.Debug("Discography folder contains album subfolders, allowing recursive processing: {0}", path);
-                        return null;
+                        var directoryInfo = new System.IO.DirectoryInfo(path);
+                        if (directoryInfo.Exists)
+                        {
+                            var subdirs = directoryInfo.GetDirectories();
+                            var hasAlbumSubfolders = subdirs.Any(d => Regex.IsMatch(d.Name, @"^\d{4}\s*-\s*\w"));
+                            if (hasAlbumSubfolders)
+                            {
+                                _logger.Debug("Discography folder contains album subfolders, allowing recursive processing: {0}", path);
+                                return null;
+                            }
+                        }
+                    }
+                    catch
+                    {
+                        // If we can't check subfolders, apply normal rejection
                     }
 
                     return new Rejection("Appears to be a discography (multiple albums), not a single release");
                 }
 
-                // Detect other compilation patterns
-                // NOTE: "box set" and "multi-disc" patterns are NOT treated as compilations here
-                // because they represent single releases with multiple discs, not multiple albums.
-                // Multi-disc detection happens separately in IdentificationService.
+                // Detect other compilation and anthology patterns
                 var compilationPatterns = new[]
                 {
                     @"\boriginal\s+album",
@@ -388,18 +326,11 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
 
                 decision = new ImportDecision<LocalAlbumRelease>(localAlbumRelease, reasons.ToArray());
 
-                // Allow partial imports where all database tracks are found plus extras
-                if (IsPartialImportWithAllDatabaseTracks(localAlbumRelease) && decision.Rejections.Any())
+                // For classical music, apply more lenient matching criteria
+                if (localAlbumRelease.IsLikelyClassical && decision.Rejections.Any())
                 {
-                    _logger.Debug("Partial import detected: all database tracks found with additional local tracks");
-                    decision = new ImportDecision<LocalAlbumRelease>(localAlbumRelease, reasons.Where(r => !IsTrackCountMismatch(r)).ToArray());
-                }
-
-                // Apply lenient track count matching for classical music and high-match-ratio albums
-                if (ShouldApplyTrackCountLeniency(localAlbumRelease) && decision.Rejections.Any())
-                {
-                    _logger.Debug("Applying lenient track count matching for album");
-                    decision = new ImportDecision<LocalAlbumRelease>(localAlbumRelease, reasons.Where(r => !IsTrackCountMismatch(r)).ToArray());
+                    _logger.Debug("Album appears to be classical music, applying lenient matching");
+                    decision = new ImportDecision<LocalAlbumRelease>(localAlbumRelease, reasons.Where(r => !IsLenientForClassical(r)).ToArray());
                 }
             }
 

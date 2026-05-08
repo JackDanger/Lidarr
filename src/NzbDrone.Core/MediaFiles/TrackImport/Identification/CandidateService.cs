@@ -395,14 +395,19 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Identification
                 var variants = new List<string>
                 {
                     albumTitle,
+
                     // Remove parenthetical content (live recordings, edition markers)
                     Regex.Replace(albumTitle, @"\s*\(.*?\)\s*", " ").Trim(),
+
                     // Remove edition/variant markers (REMASTER, DELUXE, SPECIAL EDITION, etc)
                     Regex.Replace(albumTitle, @"\b(remaster|deluxe|special|expanded|anniversary|edition|version|remix|radio|clean|explicit|acoustic)\b", " ", RegexOptions.IgnoreCase).Trim(),
+
                     // Remove leading year pattern (YYYY - Album becomes Album)
                     Regex.Replace(albumTitle, @"^\d{4}\s*-\s*", "").Trim(),
+
                     // 80% truncation for long names (handles truncated tags)
                     albumTitle.Length > 10 ? albumTitle.Substring(0, (int)(albumTitle.Length * 0.8)) : albumTitle,
+
                     // Combine: no parentheticals AND no edition markers
                     Regex.Replace(Regex.Replace(albumTitle, @"\s*\(.*?\)\s*", " "), @"\b(remaster|deluxe|special|expanded|anniversary|edition|version|remix|radio|clean|explicit|acoustic)\b", " ", RegexOptions.IgnoreCase).Trim(),
                 };
