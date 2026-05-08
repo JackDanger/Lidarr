@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using Newtonsoft.Json;
 using NLog;
 using NzbDrone.Core.Lifecycle;
 using NzbDrone.Core.MediaFiles.Commands;
@@ -69,20 +68,13 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
 
                 var manualImports = new List<ManualImportCommand>();
 
-                // Filter to manual import commands and deserialize them
+                // Filter to manual import commands
                 foreach (var cmd in queuedCommands.Where(c => c.Name == "ManualImport"))
                 {
-                    try
+                    var manualImportCmd = cmd.Body as ManualImportCommand;
+                    if (manualImportCmd != null)
                     {
-                        var manualImportCmd = JsonConvert.DeserializeObject<ManualImportCommand>(cmd.Body);
-                        if (manualImportCmd != null)
-                        {
-                            manualImports.Add(manualImportCmd);
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.Warn(ex, "Failed to deserialize manual import command, skipping");
+                        manualImports.Add(manualImportCmd);
                     }
                 }
 
