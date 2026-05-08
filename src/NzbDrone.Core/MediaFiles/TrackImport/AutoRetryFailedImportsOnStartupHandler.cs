@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using NLog;
+using NzbDrone.Core.Download;
 using NzbDrone.Core.Lifecycle;
 using NzbDrone.Core.MediaFiles.Commands;
 using NzbDrone.Core.MediaFiles.TrackImport.Manual;
@@ -54,9 +55,13 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
                 }
             }
 
-            // Also trigger disk scan to catch any files that haven't been processed yet
+            // Trigger root folder scan to catch any files that haven't been processed yet
             _logger.Info("Triggering root folder scan to identify any unmatched files with improved logic.");
             _commandQueueManager.Push(new RescanFoldersCommand(), CommandPriority.High);
+
+            // Also trigger check for failed downloads that need to be re-imported with improved logic
+            _logger.Info("Triggering re-check of failed downloads to retry with improved matching.");
+            _commandQueueManager.Push(new CheckForFinishedDownloadCommand(), CommandPriority.High);
         }
 
         private List<ManualImportCommand> GetPendingManualImports()
