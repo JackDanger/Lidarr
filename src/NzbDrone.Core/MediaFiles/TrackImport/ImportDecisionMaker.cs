@@ -285,7 +285,10 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
                     return new Rejection("Appears to be a discography (multiple albums), not a single release");
                 }
 
-                // Detect other compilation patterns (but NOT box sets, which are single releases)
+                // Detect other compilation patterns
+                // NOTE: "box set" and "multi-disc" patterns are NOT treated as compilations here
+                // because they represent single releases with multiple discs, not multiple albums.
+                // Multi-disc detection happens separately in IdentificationService.
                 var compilationPatterns = new[]
                 {
                     @"\boriginal\s+album",
