@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Tail or grep Lidarr logs on the container without ssh-quoting hell.
+#
+# Examples:
+#   ./scripts/lidarr-log               # last 50 lines
+#   ./scripts/lidarr-log -n 200        # last 200 lines
+#   ./scripts/lidarr-log -f            # follow new lines
+#   ./scripts/lidarr-log -e            # last 50 errors/warnings
+#   ./scripts/lidarr-log -f -e         # follow, errors/warnings only
+#   ./scripts/lidarr-log -g Identif    # last 50 matching "Identif"
+#   ./scripts/lidarr-log -f -g Import  # follow lines matching "Import"
+
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+source scripts/_common.sh
+
+LINES=50
+FOLLOW=0
+PATTERN=""
+
+usage() {
+  awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"
+  exit "${1:-1}"
+}
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -f|--follow)  FOLLOW=1; shift ;;
+    -n)           LINES=$2; shift 2 ;;
+    # NLog format puts severity between two pipes (|Warn|, |Error|, |Fatal|).
+    # Anchoring to that avoids matching the words "fail" / "warn" in message bodies.
+    -e|--errors)  PATTERN='\|(Warn|Error|Fatal)\|'; shift ;;
+    -g)           PATTERN=$2; shift 2 ;;
+    -h|--help)    usage 0 ;;
+    *)            echo "Unknown arg: $1" >&2; usage ;;
+  esac
+done
+
+# Build the remote command.
+if [[ $FOLLOW == 1 ]]; then
+  if [[ -n "$PATTERN" ]]; then
+    cmd="tail -F $LIDARR_LOG | grep --line-buffered -E '$PATTERN'"
+  else
+    cmd="tail -F $LIDARR_LOG"
+  fi
+else
+  if [[ -n "$PATTERN" ]]; then
+    # Search a generous window of recent lines, then trim to LINES matches.
+    cmd="tail -2000 $LIDARR_LOG | grep -E '$PATTERN' | tail -$LINES"
+  else
+    cmd="tail -$LINES $LIDARR_LOG"
+  fi
+fi
+
+# Colorize based on log severity. Don't use ct_exec because we want a raw pipe
+# for follow mode (no buffering through bash -c $(printf %q ...)).
+ssh "$HOST" "pct exec $CT -- bash -c \"$cmd\"" \
+  | awk -v R="$C_RED" -v Y="$C_YEL" -v D="$C_DIM" -v X="$C_RST" '
+    /\|Error\||\|Fatal\|/   { print R $0 X; next }
+    /\|Warn\|/              { print Y $0 X; next }
+    /\|Debug\|\|Trace\|/    { print D $0 X; next }
+    { print }
+  '

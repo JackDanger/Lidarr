@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# Push current branch and trigger a build+deploy on lxc 163.
+# Filters the noisy MSBuild output down to errors/warnings/milestones.
+# Full log is saved to /tmp/lidarr-deploy-<timestamp>.log.
+
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+source scripts/_common.sh
+
+LOG=/tmp/lidarr-deploy-$(date +%Y%m%d-%H%M%S).log
+
+echo "${C_CYA}==>${C_RST} Pushing $(git branch --show-current)..."
+git push 2>&1 | tail -3 || {
+  echo "${C_RED}Push failed${C_RST}"; exit 1;
+}
+
+LOCAL_HEAD=$(git rev-parse --short HEAD)
+echo "${C_CYA}==>${C_RST} Local HEAD is ${C_GRN}$LOCAL_HEAD${C_RST}"
+
+echo "${C_CYA}==>${C_RST} Building on $HOST/lxc-$CT (full log: $LOG)..."
+echo
+
+# Stream full output to log file; surface only what matters to stdout.
+# We tag MSBuild errors red, warnings (the SA####/CA#### kind) yellow, and
+# the "Build succeeded/FAILED", "systemctl restart", "+ <step>" lines green.
+set +e
+ssh "$HOST" "pct exec $CT -- bash /root/lidarr_build.sh" 2>&1 \
+  | tee "$LOG" \
+  | awk -v R="$C_RED" -v Y="$C_YEL" -v G="$C_GRN" -v D="$C_DIM" -v X="$C_RST" '
+    /error [A-Z]+[0-9]+:|: error [A-Z]+[0-9]+|FAILED|Build FAILED/  { print R $0 X; next }
+    /warning [A-Z]+[0-9]+:|: warning [A-Z]+[0-9]+/                  { print Y $0 X; next }
+    /^Build succeeded|systemctl restart|^Finish .|^Start ./          { print G $0 X; next }
+    /^\+ /                                                            { print D $0 X; next }
+  '
+BUILD_RC=${PIPESTATUS[0]}
+set -e
+
+if [[ $BUILD_RC -ne 0 ]]; then
+  echo
+  echo "${C_RED}Build script exited $BUILD_RC. Inspect $LOG${C_RST}"
+  exit $BUILD_RC
+fi
+
+# Verify deployed commit matches what we pushed.
+DEPLOYED=$(ct_exec "cd $LIDARR_REPO && git rev-parse --short HEAD")
+echo
+echo "${C_CYA}==>${C_RST} Deployed HEAD: ${C_GRN}$DEPLOYED${C_RST}"
+if [[ "$DEPLOYED" != "$LOCAL_HEAD" ]]; then
+  echo "${C_YEL}Warning:${C_RST} deployed $DEPLOYED != local $LOCAL_HEAD"
+fi
+
+# Wait for service, then surface the post-restart health summary.
+echo "${C_CYA}==>${C_RST} Waiting for service..."
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  status=$(ssh "$HOST" "pct exec $CT -- systemctl is-active lidarr" 2>/dev/null || true)
+  if [[ "$status" == "active" ]]; then break; fi
+  sleep 1
+done
+echo "${C_CYA}==>${C_RST} Service: ${C_GRN}$status${C_RST}"
+
+# Wait for the API to actually come up — Lidarr.dll loads slowly.
+for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+  if curl -sS -o /dev/null -m 2 "$LIDARR_URL/system/status" \
+       -H "X-Api-Key: $(lidarr_apikey)"; then
+    break
+  fi
+  sleep 2
+done
+
+# Show recent startup warnings/errors so we know what we walked into.
+echo
+echo "${C_CYA}==>${C_RST} Recent startup events (last 20):"
+ct_exec "tail -100 $LIDARR_LOG | grep -iE 'warn|error|fail|started|exception' | tail -20" \
+  | awk -v R="$C_RED" -v Y="$C_YEL" -v X="$C_RST" '
+    /Error|error|Fail|fail|Exception/ { print R $0 X; next }
+    /Warn|warn/                       { print Y $0 X; next }
+    { print }
+  '

@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Drop into a shell on the lxc-163 container, or run a one-off command.
+#
+#   ./scripts/lidarr-shell                 # interactive shell
+#   ./scripts/lidarr-shell ls /var/log     # one-off command
+
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+source scripts/_common.sh
+
+if [[ $# -eq 0 ]]; then
+  exec ssh -t "$HOST" "pct enter $CT"
+else
+  ct_exec "$*"
+fi
