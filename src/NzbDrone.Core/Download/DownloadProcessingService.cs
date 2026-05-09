@@ -44,6 +44,21 @@ namespace NzbDrone.Core.Download
             }
         }
 
+        private void RemoveStuckFailedImports()
+        {
+            var stuckDownloads = _trackedDownloadService.GetTrackedDownloads()
+                                                       .Where(t => t.State == TrackedDownloadState.ImportFailed &&
+                                                                   t.Added.HasValue &&
+                                                                   DateTime.UtcNow - t.Added.Value > TimeSpan.FromDays(7))
+                                                       .ToList();
+
+            foreach (var trackedDownload in stuckDownloads)
+            {
+                _logger.Info("Removing download stuck in ImportFailed state for 7+ days: {0}", trackedDownload.DownloadItem.Title);
+                _trackedDownloadService.StopTracking(trackedDownload.DownloadItem.DownloadId);
+            }
+        }
+
         public void Execute(ProcessMonitoredDownloadsCommand message)
         {
             var enableCompletedDownloadHandling = _configService.EnableCompletedDownloadHandling;
@@ -89,6 +104,9 @@ namespace NzbDrone.Core.Download
 
             // Imported downloads are no longer trackable so process them after processing trackable downloads
             RemoveCompletedDownloads();
+
+            // Remove downloads stuck in ImportFailed for 7+ days to prevent queue bloat
+            RemoveStuckFailedImports();
 
             _eventAggregator.PublishEvent(new DownloadsProcessedEvent());
         }
