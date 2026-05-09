@@ -44,8 +44,11 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Specifications
 
                     if (newTracks.Any())
                     {
-                        _logger.Debug("Release missing {0} MB tracks but imports {1} new track(s) we don't have. Accepting {2}",
-                            item.TrackMapping.MBExtra.Count, newTracks.Count, item);
+                        _logger.Debug(
+                            "Release missing {0} MB tracks but imports {1} new track(s) we don't have. Accepting {2}",
+                            item.TrackMapping.MBExtra.Count,
+                            newTracks.Count,
+                            item);
                         return Decision.Accept();
                     }
                 }
@@ -55,8 +58,10 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Specifications
                     var matchedTracks = item.TrackMapping.Mapping.Values.Select(t => t.Item1).ToList();
                     if (matchedTracks.Any())
                     {
-                        _logger.Debug("Release missing some MB tracks but all {0} matched tracks are new. Accepting {1}",
-                            matchedTracks.Count, item);
+                        _logger.Debug(
+                            "Release missing some MB tracks but all {0} matched tracks are new. Accepting {1}",
+                            matchedTracks.Count,
+                            item);
                         return Decision.Accept();
                     }
                 }
