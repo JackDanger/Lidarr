@@ -166,25 +166,13 @@ namespace NzbDrone.Core.Download
                             new TrackedDownloadStatusMessage(Path.GetFileName(v.ImportDecision.Item.Path),
                                 v.Errors)));
 
-                // "Nothing to do" short-circuit: if every non-imported result is a
-                // benign "we already have this content" rejection, this download is
-                // genuinely complete from the user's point of view — the library
-                // already has what's in the download. Marking it Imported rather
-                // than ImportFailed lets the queue clear, the download client
-                // releases the slot, and we don't waste CPU re-running identification
-                // every refresh forever. The user can still see what happened in
-                // history; we publish DownloadCompletedEvent the same as a regular
-                // successful import.
-                if (IsAllAlreadyHaveContent(importResults))
+                // Short-circuit terminal states: we evaluate whether every non-imported
+                // result is "non-actionable" (either benign — we already have it — or
+                // structurally unfixable — MB has no entry). If so we move the download
+                // out of the retry loop. Otherwise it stays ImportFailed so it gets
+                // another pass when matching code or metadata changes.
+                if (TryHandleNonActionable(trackedDownload, importResults, statusMessages))
                 {
-                    _logger.Info("Download '{0}' content already in library; marking as Imported (no upgrades available).", trackedDownload.DownloadItem.Title);
-                    trackedDownload.State = TrackedDownloadState.Imported;
-
-                    if (trackedDownload.RemoteAlbum?.Artist != null)
-                    {
-                        _eventAggregator.PublishEvent(new DownloadCompletedEvent(trackedDownload, trackedDownload.RemoteAlbum.Artist.Id));
-                    }
-
                     return;
                 }
 
@@ -209,12 +197,21 @@ namespace NzbDrone.Core.Download
             }
         }
 
-        // Rejection reason prefixes that mean "the user already has this content".
-        // Items rejected solely with these reasons are not failures we should retry —
-        // there is genuinely nothing to do. Kept narrow on purpose: things like
-        // "Album match is not close enough" or "Couldn't find similar album" are
-        // excluded because future matching improvements / MusicBrainz updates / a
-        // user-driven manual import could yet fix them.
+        // Rejection reasons split into two non-actionable buckets:
+        //
+        // _alreadyHaveContentPrefixes — the library already has this. The download
+        //   succeeded from the user's perspective; just nothing to import. State →
+        //   Imported, queue clears.
+        //
+        // _unfindableInMetadataPrefixes — Lidarr couldn't identify the content
+        //   against any MusicBrainz release. We can't import without metadata.
+        //   State → ImportBlocked: still visible in queue, but not auto-retried.
+        //   The user can manually import via UI, or we'll re-process automatically
+        //   after a Lidarr restart (cache cleared) or a user-triggered refresh.
+        //
+        // Anything else (album/track score thresholds, "destination already exists",
+        // etc.) stays in the normal ImportFailed retry loop because future code
+        // changes or metadata updates could plausibly fix it.
         private static readonly string[] _alreadyHaveContentPrefixes =
         {
             "All matched tracks already in library",
@@ -223,14 +220,20 @@ namespace NzbDrone.Core.Download
             "Not an upgrade for existing track file"
         };
 
-        private static bool IsAlreadyHaveContentReason(string error)
+        private static readonly string[] _unfindableInMetadataPrefixes =
+        {
+            "Couldn't find similar album for",
+            "No tracks could be matched to a release"
+        };
+
+        private static bool MatchesAnyPrefix(string error, string[] prefixes)
         {
             if (string.IsNullOrWhiteSpace(error))
             {
                 return false;
             }
 
-            foreach (var prefix in _alreadyHaveContentPrefixes)
+            foreach (var prefix in prefixes)
             {
                 if (error.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
                 {
@@ -241,22 +244,70 @@ namespace NzbDrone.Core.Download
             return false;
         }
 
-        private static bool IsAllAlreadyHaveContent(List<ImportResult> results)
+        private bool TryHandleNonActionable(TrackedDownload trackedDownload, List<ImportResult> importResults, List<TrackedDownloadStatusMessage> statusMessages)
         {
-            // Any non-imported result must be entirely composed of "already have it"
-            // rejection reasons. Empty Errors lists fail this check (we can't be sure
-            // why the result is non-imported, so be conservative). At least one such
-            // non-imported result must exist or the caller wouldn't be in this branch.
-            var nonImported = results.Where(r => r.Result != ImportResultType.Imported).ToList();
+            // Walk every non-imported result. If any of them includes a rejection we
+            // could plausibly fix later (i.e. doesn't match either non-actionable
+            // bucket), fall back to the normal ImportFailed retry path — we don't want
+            // to bury items that future code changes could rescue.
+            //
+            // If everything's accounted for, choose between Imported (we have it all)
+            // and ImportBlocked (some content can't be matched).
+            var nonImported = importResults.Where(r => r.Result != ImportResultType.Imported).ToList();
             if (nonImported.Count == 0)
             {
                 return false;
             }
 
-            return nonImported.All(r =>
-                r.Errors != null
-                && r.Errors.Count > 0
-                && r.Errors.All(IsAlreadyHaveContentReason));
+            var hasUnfindable = false;
+
+            foreach (var result in nonImported)
+            {
+                if (result.Errors == null || result.Errors.Count == 0)
+                {
+                    return false;
+                }
+
+                foreach (var error in result.Errors)
+                {
+                    if (MatchesAnyPrefix(error, _alreadyHaveContentPrefixes))
+                    {
+                        continue;
+                    }
+
+                    if (MatchesAnyPrefix(error, _unfindableInMetadataPrefixes))
+                    {
+                        hasUnfindable = true;
+                        continue;
+                    }
+
+                    // Some other rejection — leave for retry under existing flow.
+                    return false;
+                }
+            }
+
+            if (hasUnfindable)
+            {
+                _logger.Info("Download '{0}' has files Lidarr couldn't match in MusicBrainz; marking as ImportBlocked (manual import or MB metadata needed).", trackedDownload.DownloadItem.Title);
+
+                if (statusMessages.Any())
+                {
+                    trackedDownload.Warn(statusMessages.ToArray());
+                }
+
+                SetStateToImportBlocked(trackedDownload);
+                return true;
+            }
+
+            _logger.Info("Download '{0}' content already in library; marking as Imported (no upgrades available).", trackedDownload.DownloadItem.Title);
+            trackedDownload.State = TrackedDownloadState.Imported;
+
+            if (trackedDownload.RemoteAlbum?.Artist != null)
+            {
+                _eventAggregator.PublishEvent(new DownloadCompletedEvent(trackedDownload, trackedDownload.RemoteAlbum.Artist.Id));
+            }
+
+            return true;
         }
 
         public bool VerifyImport(TrackedDownload trackedDownload, List<ImportResult> importResults)
