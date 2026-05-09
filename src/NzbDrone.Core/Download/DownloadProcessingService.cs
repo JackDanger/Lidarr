@@ -44,27 +44,39 @@ namespace NzbDrone.Core.Download
             }
         }
 
-        private void RetryStuckFailedImports()
+        private void ResetFailedImportsForRetry()
         {
-            var stuckDownloads = _trackedDownloadService.GetTrackedDownloads()
-                                                       .Where(t => t.State == TrackedDownloadState.ImportFailed &&
-                                                                   t.Added.HasValue &&
-                                                                   DateTime.UtcNow - t.Added.Value > TimeSpan.FromDays(7))
-                                                       .ToList();
+            // Move every ImportFailed item back to ImportPending so it gets re-evaluated
+            // on this same Execute() pass. We never delete or stop tracking — if the
+            // failure was permanent (corrupt file, MB really doesn't have the album)
+            // the next attempt will simply land back in ImportFailed. No-op if nothing
+            // failed. Cost is one extra import attempt per failed item per refresh; that's
+            // strictly cheaper than the user re-triggering manually.
+            var failed = _trackedDownloadService.GetTrackedDownloads()
+                                               .Where(t => t.State == TrackedDownloadState.ImportFailed)
+                                               .ToList();
 
-            foreach (var trackedDownload in stuckDownloads)
+            if (failed.Count == 0)
             {
-                // Log to NLog only — don't call trackedDownload.Warn(): that appends to
-                // the queue entry's StatusMessages, which the UI surfaces as if it were a
-                // rejection reason. The retry is an internal state transition, not a problem
-                // the user needs to see in the per-item message column.
-                _logger.Info("Retrying import for download stuck in ImportFailed state for 7+ days: {0}", trackedDownload.DownloadItem.Title);
+                return;
+            }
+
+            // Single summary line to NLog — don't call trackedDownload.Warn(), which
+            // would surface this transition as a rejection in the queue UI.
+            _logger.Info("Re-queueing {0} previously-failed import(s) for retry with current matching logic.", failed.Count);
+
+            foreach (var trackedDownload in failed)
+            {
                 trackedDownload.State = TrackedDownloadState.ImportPending;
             }
         }
 
         public void Execute(ProcessMonitoredDownloadsCommand message)
         {
+            // Reset failed imports BEFORE the main loop so they get re-tried in this same
+            // pass. Any item that fails again will end up back in ImportFailed by the end.
+            ResetFailedImportsForRetry();
+
             var enableCompletedDownloadHandling = _configService.EnableCompletedDownloadHandling;
             var trackedDownloads = _trackedDownloadService.GetTrackedDownloads()
                                                           .Where(t => t.IsTrackable)
@@ -108,9 +120,6 @@ namespace NzbDrone.Core.Download
 
             // Imported downloads are no longer trackable so process them after processing trackable downloads
             RemoveCompletedDownloads();
-
-            // Retry downloads stuck in ImportFailed for 7+ days with improved matching logic instead of removing them
-            RetryStuckFailedImports();
 
             _eventAggregator.PublishEvent(new DownloadsProcessedEvent());
         }
