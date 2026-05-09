@@ -9,17 +9,18 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Specifications
 {
     public class CloseAlbumMatchSpecification : IImportDecisionEngineSpecification<LocalAlbumRelease>
     {
-        // Strict default: reject if distance > 0.50 (i.e. < 50% match).
+        // Strict default: reject if distance > 0.50 (i.e. < 50% match). Used when the
+        // candidate's artist disagrees with the file's artist tag — a bad sign that we'd
+        // be filing the album under the wrong artist entirely.
         private const double _strictAlbumThreshold = 0.50;
         private const double _strictTrackThreshold = 0.50;
 
-        // Lenient threshold used when the artist clearly matched (artist not in distance
-        // reasons). Most "Album match is not close enough" rejections here are bonus
-        // tracks / live recordings / region variants of an album by a known artist —
+        // Lenient threshold for the album-level check when the artist matched (artist not
+        // in distance reasons). Most "Album match is not close enough" rejections here are
+        // bonus tracks / live recordings / region variants of an album by a known artist —
         // import them anyway, per the user's "anything that improves the library" rule.
         // Distance > 0.80 (i.e. < 20% match) still rejects, to avoid garbage imports.
         private const double _artistKnownAlbumThreshold = 0.80;
-        private const double _artistKnownTrackThreshold = 0.85;
 
         private readonly Logger _logger;
 
@@ -51,15 +52,24 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Specifications
                     _logger.Debug($"No tracks matched");
                     return Decision.Reject("No tracks matched");
                 }
-                else
+
+                // When the artist matched (we're in lenient mode), the album-level decision
+                // above is authoritative — don't let a single weird track block the whole
+                // album. Bonus tracks, live-recording variants, and tag-mismatched files
+                // are common; per-track import has its own track-level decision logic that
+                // will quietly skip individual files that genuinely don't fit.
+                //
+                // Only enforce the worst-track wall when we're already in strict mode
+                // (artist mismatched the candidate). There a bad track is real evidence
+                // that Lidarr picked the wrong release entirely.
+                if (ContainsArtist(reasons))
                 {
                     var maxTrackDist = worstTrackMatch.Distance.NormalizedDistance();
                     var trackReasons = worstTrackMatch.Distance.Reasons;
-                    var trackThreshold = SelectTrackThreshold(reasons, trackReasons);
-                    if (maxTrackDist > trackThreshold)
+                    if (maxTrackDist > _strictTrackThreshold)
                     {
-                        _logger.Debug($"Worst track match: {maxTrackDist} vs {trackThreshold} {trackReasons}. Skipping {item}");
-                        return Decision.Reject($"Worst track match: {1 - maxTrackDist:P1} vs {1 - trackThreshold:P0} {trackReasons}");
+                        _logger.Debug($"Worst track match: {maxTrackDist} vs {_strictTrackThreshold} {trackReasons}. Skipping {item}");
+                        return Decision.Reject($"Worst track match: {1 - maxTrackDist:P1} vs {1 - _strictTrackThreshold:P0} {trackReasons}");
                     }
                 }
             }
@@ -88,18 +98,6 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Specifications
             // the candidate's artist — we should not relax. Otherwise the user already had
             // this artist; album-name fuzziness is acceptable.
             return ContainsArtist(reasons) ? _strictAlbumThreshold : _artistKnownAlbumThreshold;
-        }
-
-        private static double SelectTrackThreshold(string albumReasons, string trackReasons)
-        {
-            // Same rule — but also keep strict if the worst track itself disagrees on
-            // recording_id AND title (likely the wrong track entirely, not a variant).
-            if (ContainsArtist(albumReasons))
-            {
-                return _strictTrackThreshold;
-            }
-
-            return _artistKnownTrackThreshold;
         }
 
         private static bool ContainsArtist(string reasons) =>
