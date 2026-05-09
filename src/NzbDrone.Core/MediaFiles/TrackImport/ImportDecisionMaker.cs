@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.IO.Abstractions;
 using System.Linq;
-using System.Text.RegularExpressions;
 using NLog;
 using NzbDrone.Common.Extensions;
 using NzbDrone.Common.Instrumentation.Extensions;
@@ -234,77 +233,23 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
 
         private Rejection GetCompilationRejection(LocalAlbumRelease localAlbumRelease)
         {
-            if (localAlbumRelease.LocalTracks == null || !localAlbumRelease.LocalTracks.Any())
-            {
-                return null;
-            }
-
-            try
-            {
-                var path = System.IO.Path.GetDirectoryName(localAlbumRelease.LocalTracks.First().Path);
-                if (string.IsNullOrEmpty(path))
-                {
-                    return null;
-                }
-
-                var folderName = System.IO.Path.GetFileName(path).ToLower();
-
-                // Skip box sets and multi-disc albums - these are single releases with multiple discs
-                if (Regex.IsMatch(folderName, @"\bbox\s+set|\bcd\s*\d+|-CD\d|-cd\d|(\d+).*cd(s)?|multi.?cd|multi.?disc"))
-                {
-                    _logger.Debug("Skipping compilation check for box set/multi-disc album: {0}", folderName);
-                    return null;
-                }
-
-                // Check for discography pattern
-                if (Regex.IsMatch(folderName, @"\bdiscograph"))
-                {
-                    // If it contains album subfolders (YYYY - Album pattern), skip rejection
-                    try
-                    {
-                        var directoryInfo = new System.IO.DirectoryInfo(path);
-                        if (directoryInfo.Exists)
-                        {
-                            var subdirs = directoryInfo.GetDirectories();
-                            var hasAlbumSubfolders = subdirs.Any(d => Regex.IsMatch(d.Name, @"^\d{4}\s*-\s*\w"));
-                            if (hasAlbumSubfolders)
-                            {
-                                _logger.Debug("Discography folder contains album subfolders, allowing recursive processing: {0}", path);
-                                return null;
-                            }
-                        }
-                    }
-                    catch
-                    {
-                        // If we can't check subfolders, apply normal rejection
-                    }
-
-                    return new Rejection("Appears to be a discography (multiple albums), not a single release");
-                }
-
-                // Detect other compilation and anthology patterns
-                var compilationPatterns = new[]
-                {
-                    @"\boriginal\s+album",
-                    @"\bessentials?",
-                    @"\bcollection",
-                    @"\banthology",
-                    @"\bcompilat"
-                };
-
-                foreach (var pattern in compilationPatterns)
-                {
-                    if (Regex.IsMatch(folderName, pattern))
-                    {
-                        return new Rejection("Appears to be a compilation (multiple albums), not a single release");
-                    }
-                }
-            }
-            catch (Exception e)
-            {
-                _logger.Error(e, "Error checking for compilation patterns in {0}", localAlbumRelease);
-            }
-
+            // We used to reject folders whose names matched patterns like "anthology",
+            // "collection", "essentials", "compilation" — that was throwing away tons of
+            // legitimate single-album imports just because the album's title happened to
+            // include one of those words ("The Essential Bowie", "Greatest Hits Collection",
+            // etc.). Trust MusicBrainz: if we can identify the folder as a release,
+            // import it regardless of marketing-flavored title words.
+            //
+            // True multi-album discography folders ("Artist - Discography 1970-2020") with
+            // YYYY-Album subfolders are still handled correctly: each subfolder becomes
+            // its own LocalAlbumRelease via Lidarr's normal grouping. A discography folder
+            // with no audio files in the root never reaches this code.
+            //
+            // The one case we still want to suppress is a discography folder where the
+            // root contains audio but no per-album subfolders — that's truly multiple
+            // albums dumped in one directory and we cannot identify it as a single
+            // release. Those will already fail MB lookup and get a "Couldn't find similar
+            // album" rejection from the next step, which is the correct message.
             return null;
         }
 

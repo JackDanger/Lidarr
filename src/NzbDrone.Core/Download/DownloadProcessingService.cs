@@ -54,9 +54,12 @@ namespace NzbDrone.Core.Download
 
             foreach (var trackedDownload in stuckDownloads)
             {
+                // Log to NLog only — don't call trackedDownload.Warn(): that appends to
+                // the queue entry's StatusMessages, which the UI surfaces as if it were a
+                // rejection reason. The retry is an internal state transition, not a problem
+                // the user needs to see in the per-item message column.
                 _logger.Info("Retrying import for download stuck in ImportFailed state for 7+ days: {0}", trackedDownload.DownloadItem.Title);
                 trackedDownload.State = TrackedDownloadState.ImportPending;
-                trackedDownload.Warn("Retrying import after 7+ days in failed state with improved matching logic.");
             }
         }
 
