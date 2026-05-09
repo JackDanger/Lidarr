@@ -23,13 +23,20 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Identification
     public class CandidateService : ICandidateService
     {
         private readonly ISearchForNewAlbum _albumSearchService;
+        private readonly IAsyncSearchForNewAlbum _asyncAlbumSearch;
         private readonly IArtistService _artistService;
         private readonly IAlbumService _albumService;
         private readonly IReleaseService _releaseService;
         private readonly IMediaFileService _mediaFileService;
         private readonly Logger _logger;
 
+        // IEnumerable<IAsyncSearchForNewAlbum> instead of a direct dep so the type is
+        // optional: when no implementation is registered (e.g. plugin-only deployment
+        // where the built-in SkyHookProxy is replaced) we fall back to wrapping the sync
+        // surface in Task.Run. SkyHookProxy implements both interfaces, so in the normal
+        // case _asyncAlbumSearch is the same instance as _albumSearchService.
         public CandidateService(ISearchForNewAlbum albumSearchService,
+                                IEnumerable<IAsyncSearchForNewAlbum> asyncAlbumSearch,
                                 IArtistService artistService,
                                 IAlbumService albumService,
                                 IReleaseService releaseService,
@@ -37,6 +44,7 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Identification
                                 Logger logger)
         {
             _albumSearchService = albumSearchService;
+            _asyncAlbumSearch = asyncAlbumSearch?.FirstOrDefault();
             _artistService = artistService;
             _albumService = albumService;
             _releaseService = releaseService;
@@ -319,12 +327,12 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Identification
                 if (albumIds.Count == 1 && albumIds[0].IsNotNullOrWhiteSpace())
                 {
                     // Use mbids in tags if set
-                    remoteAlbums = await _albumSearchService.SearchForNewAlbumAsync($"mbid:{albumIds[0]}", null);
+                    remoteAlbums = await SearchAlbumAsync($"mbid:{albumIds[0]}", null);
                 }
                 else if (recordingIds.Any())
                 {
                     // If fingerprints present use those
-                    remoteAlbums = await _albumSearchService.SearchForNewAlbumByRecordingIdsAsync(recordingIds);
+                    remoteAlbums = await SearchByRecordingIdsAsync(recordingIds);
                 }
                 else
                 {
@@ -347,11 +355,11 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Identification
                         return candidates;
                     }
 
-                    remoteAlbums = await _albumSearchService.SearchForNewAlbumAsync(albumTag, artistTag);
+                    remoteAlbums = await SearchAlbumAsync(albumTag, artistTag);
 
                     if (remoteAlbums.Count == 0 && albumTag.Length > 5)
                     {
-                        remoteAlbums = await _albumSearchService.EnhancedSearchWithVariantsAsync(albumTag, artistTag);
+                        remoteAlbums = await SearchWithVariantsAsync(albumTag, artistTag);
                     }
                 }
             }
@@ -380,6 +388,34 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Identification
             _logger.Debug($"Getting {candidates.Count} remote candidates from tags for {localAlbumRelease.LocalTracks.Count} tracks took {watch.ElapsedMilliseconds}ms");
 
             return candidates;
+        }
+
+        // ---- Async dispatch helpers ----------------------------------------------------
+        // Use the async impl if registered (SkyHookProxy normally is). Otherwise wrap the
+        // sync surface in Task.Run so concurrent callers still get parallelism via thread
+        // pool, even when the active metadata source only implements ISearchForNewAlbum.
+
+        private Task<List<Album>> SearchAlbumAsync(string title, string artist)
+        {
+            return _asyncAlbumSearch != null
+                ? _asyncAlbumSearch.SearchForNewAlbumAsync(title, artist)
+                : Task.Run(() => _albumSearchService.SearchForNewAlbum(title, artist));
+        }
+
+        private Task<List<Album>> SearchByRecordingIdsAsync(List<string> recordingIds)
+        {
+            return _asyncAlbumSearch != null
+                ? _asyncAlbumSearch.SearchForNewAlbumByRecordingIdsAsync(recordingIds)
+                : Task.Run(() => _albumSearchService.SearchForNewAlbumByRecordingIds(recordingIds));
+        }
+
+        private Task<List<Album>> SearchWithVariantsAsync(string title, string artist)
+        {
+            // Async impl provides EnhancedSearchWithVariantsAsync (richer fuzzy strategy).
+            // Without it, fall back to the sync TryFuzzyMatchAlbum already on this class.
+            return _asyncAlbumSearch != null
+                ? _asyncAlbumSearch.EnhancedSearchWithVariantsAsync(title, artist)
+                : Task.Run(() => TryFuzzyMatchAlbum(title, artist));
         }
 
         private List<Album> TryFuzzyMatchAlbum(string albumTitle, string artistName)

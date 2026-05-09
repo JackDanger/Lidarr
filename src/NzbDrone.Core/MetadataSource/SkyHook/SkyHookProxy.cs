@@ -17,7 +17,7 @@ using NzbDrone.Core.Profiles.Metadata;
 
 namespace NzbDrone.Core.MetadataSource.SkyHook
 {
-    public class SkyHookProxy : IProvideArtistInfoAsync, ISearchForNewArtist, IProvideAlbumInfo, ISearchForNewAlbum, ISearchForNewEntity
+    public class SkyHookProxy : IProvideArtistInfoAsync, ISearchForNewArtist, IProvideAlbumInfo, ISearchForNewAlbum, IAsyncSearchForNewAlbum, ISearchForNewEntity
     {
         private readonly IHttpClient _httpClient;
         private readonly Logger _logger;
