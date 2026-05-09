@@ -38,7 +38,17 @@ case "$cmd" in
     lidarr_curl "/system/status" | jq -r '"  v\(.version)  build \(.buildTime)  up since \(.startTime)"'
 
     printf "\n${C_CYA}=== Queue ===${C_RST}\n"
-    echo "$queue_json" | jq -r '"  total: \(.totalRecords)\n  by status: \(.records | group_by(.status) | map("\(.[0].status)=\(length)") | join(", "))\n  by trackedDownloadState: \(.records | group_by(.trackedDownloadState) | map("\(.[0].trackedDownloadState)=\(length)") | join(", "))\n  distinct downloadIds: \(.records | map(.downloadId) | unique | length)\n  duplication ratio: \(((.records | length) / (.records | map(.downloadId) | unique | length) * 100 | floor) / 100)x"'
+    echo "$queue_json" | jq -r '
+      def fmt_groups(field): if length == 0 then "(none)" else group_by(field) | map("\(.[0]|getpath([field|tostring]))=\(length)") | join(", ") end;
+      .records as $rs |
+      "  total: \(.totalRecords)" +
+      (if ($rs|length) == 0 then "\n  (queue is empty)"
+       else
+         "\n  by status: \($rs | group_by(.status) | map("\(.[0].status)=\(length)") | join(", "))" +
+         "\n  by trackedDownloadState: \($rs | group_by(.trackedDownloadState) | map("\(.[0].trackedDownloadState)=\(length)") | join(", "))" +
+         "\n  distinct downloadIds: \($rs | map(.downloadId) | unique | length)" +
+         "\n  duplication ratio: \(((($rs|length) * 100) / ($rs | map(.downloadId) | unique | length) | floor) / 100)x"
+       end)'
 
     printf "\n${C_CYA}=== Top duplicating downloads (5) ===${C_RST}\n"
     echo "$queue_json" | jq -r '.records | group_by(.downloadId)

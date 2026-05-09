@@ -50,18 +50,27 @@ Severity is colorized (Error red, Warn yellow, Debug/Trace dim).
 Thin wrapper around the HTTP API.
 
 ```sh
+./scripts/lidarr summary          # one-shot dashboard (start here)
 ./scripts/lidarr queue            # counts by status
 ./scripts/lidarr queue-list 30    # first 30 items, status + title
-./scripts/lidarr rejections       # most-common rejection reasons
+./scripts/lidarr dups             # queue grouped by downloadId — find duplication
+./scripts/lidarr rejections       # most-common normalized rejection reasons
 ./scripts/lidarr stuck            # warning/error items, oldest first
 ./scripts/lidarr history 20       # last 20 events
 ./scripts/lidarr imports 10       # last 10 successful imports
+./scripts/lidarr imports-rate     # per-minute import counts for the last hour
+./scripts/lidarr grabs 10         # last 10 release grabs
 ./scripts/lidarr status           # version / build time
 ./scripts/lidarr refresh          # POST RefreshMonitoredDownloads
 ./scripts/lidarr scan             # POST RescanFolders
 ./scripts/lidarr command Backup   # arbitrary command by name
 ./scripts/lidarr raw '/queue?page=2'   # raw curl pass-through
 ```
+
+`summary` is the one to memorize — single command that surfaces queue state,
+top duplicating downloads, recent import throughput, and ranked rejections.
+`dups` complements it when you want to see *which* downloads are spawning
+the most queue records.
 
 ### `lidarr-shell`
 ```sh
