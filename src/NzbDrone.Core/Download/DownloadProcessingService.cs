@@ -44,7 +44,7 @@ namespace NzbDrone.Core.Download
             }
         }
 
-        private void RemoveStuckFailedImports()
+        private void RetryStuckFailedImports()
         {
             var stuckDownloads = _trackedDownloadService.GetTrackedDownloads()
                                                        .Where(t => t.State == TrackedDownloadState.ImportFailed &&
@@ -54,8 +54,9 @@ namespace NzbDrone.Core.Download
 
             foreach (var trackedDownload in stuckDownloads)
             {
-                _logger.Info("Removing download stuck in ImportFailed state for 7+ days: {0}", trackedDownload.DownloadItem.Title);
-                _trackedDownloadService.StopTracking(trackedDownload.DownloadItem.DownloadId);
+                _logger.Info("Retrying import for download stuck in ImportFailed state for 7+ days: {0}", trackedDownload.DownloadItem.Title);
+                trackedDownload.State = TrackedDownloadState.ImportPending;
+                trackedDownload.Warn("Retrying import after 7+ days in failed state with improved matching logic.");
             }
         }
 
@@ -105,8 +106,8 @@ namespace NzbDrone.Core.Download
             // Imported downloads are no longer trackable so process them after processing trackable downloads
             RemoveCompletedDownloads();
 
-            // Remove downloads stuck in ImportFailed for 7+ days to prevent queue bloat
-            RemoveStuckFailedImports();
+            // Retry downloads stuck in ImportFailed for 7+ days with improved matching logic instead of removing them
+            RetryStuckFailedImports();
 
             _eventAggregator.PublishEvent(new DownloadsProcessedEvent());
         }
