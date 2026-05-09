@@ -25,7 +25,8 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Specifications
 
             if (item.NewDownload && item.TrackMapping.MBExtra.Count > 0)
             {
-                // Allow import if the incoming release has more tracks than currently exist (or none exist)
+                // Allow import if we have more local files than existing tracks
+                // This implements "strictly better": we care about files we can actually import, not the complete release
                 var existingTrackCount = 0;
 
                 var album = item.AlbumRelease?.Album?.Value;
@@ -35,13 +36,18 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Specifications
                     existingTrackCount = existingRelease.Tracks.Value.Count(t => t.HasFile);
                 }
 
-                if (item.TrackCount > existingTrackCount)
+                // Count tracks that we actually have files for (total minus the missing MB tracks)
+                var localMatchedTrackCount = item.TrackCount - item.TrackMapping.MBExtra.Count;
+
+                if (localMatchedTrackCount > existingTrackCount)
                 {
-                    _logger.Debug("Release missing tracks but improves track count ({0} > {1}). Accepting {2}", item.TrackCount, existingTrackCount, item);
+                    _logger.Debug("Release missing {0} tracks from MB but has {1} matched files vs {2} existing. Net gain detected, accepting {3}",
+                        item.TrackMapping.MBExtra.Count, localMatchedTrackCount, existingTrackCount, item);
                     return Decision.Accept();
                 }
 
-                _logger.Debug("This release is missing tracks and does not improve existing track count ({0} <= {1}). Skipping {2}", item.TrackCount, existingTrackCount, item);
+                _logger.Debug("This release is missing MB tracks and matched file count ({0}) doesn't exceed existing ({1}). Skipping {2}",
+                    localMatchedTrackCount, existingTrackCount, item);
                 return Decision.Reject("Has missing tracks");
             }
 
