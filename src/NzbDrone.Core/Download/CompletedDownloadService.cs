@@ -166,6 +166,28 @@ namespace NzbDrone.Core.Download
                             new TrackedDownloadStatusMessage(Path.GetFileName(v.ImportDecision.Item.Path),
                                 v.Errors)));
 
+                // "Nothing to do" short-circuit: if every non-imported result is a
+                // benign "we already have this content" rejection, this download is
+                // genuinely complete from the user's point of view — the library
+                // already has what's in the download. Marking it Imported rather
+                // than ImportFailed lets the queue clear, the download client
+                // releases the slot, and we don't waste CPU re-running identification
+                // every refresh forever. The user can still see what happened in
+                // history; we publish DownloadCompletedEvent the same as a regular
+                // successful import.
+                if (IsAllAlreadyHaveContent(importResults))
+                {
+                    _logger.Info("Download '{0}' content already in library; marking as Imported (no upgrades available).", trackedDownload.DownloadItem.Title);
+                    trackedDownload.State = TrackedDownloadState.Imported;
+
+                    if (trackedDownload.RemoteAlbum?.Artist != null)
+                    {
+                        _eventAggregator.PublishEvent(new DownloadCompletedEvent(trackedDownload, trackedDownload.RemoteAlbum.Artist.Id));
+                    }
+
+                    return;
+                }
+
                 // Mark as failed to prevent further attempts at processing
                 trackedDownload.State = TrackedDownloadState.ImportFailed;
 
@@ -185,6 +207,56 @@ namespace NzbDrone.Core.Download
                 trackedDownload.Warn(statusMessages.ToArray());
                 SetStateToImportBlocked(trackedDownload);
             }
+        }
+
+        // Rejection reason prefixes that mean "the user already has this content".
+        // Items rejected solely with these reasons are not failures we should retry —
+        // there is genuinely nothing to do. Kept narrow on purpose: things like
+        // "Album match is not close enough" or "Couldn't find similar album" are
+        // excluded because future matching improvements / MusicBrainz updates / a
+        // user-driven manual import could yet fix them.
+        private static readonly string[] _alreadyHaveContentPrefixes =
+        {
+            "All matched tracks already in library",
+            "Has fewer tracks than existing release",
+            "Not an upgrade for existing album file",
+            "Not an upgrade for existing track file"
+        };
+
+        private static bool IsAlreadyHaveContentReason(string error)
+        {
+            if (string.IsNullOrWhiteSpace(error))
+            {
+                return false;
+            }
+
+            foreach (var prefix in _alreadyHaveContentPrefixes)
+            {
+                if (error.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool IsAllAlreadyHaveContent(List<ImportResult> results)
+        {
+            // Any non-imported result must be entirely composed of "already have it"
+            // rejection reasons. Empty Errors lists fail this check (we can't be sure
+            // why the result is non-imported, so be conservative). At least one such
+            // non-imported result must exist or the caller wouldn't be in this branch.
+            var nonImported = results.Where(r => r.Result != ImportResultType.Imported).ToList();
+            if (nonImported.Count == 0)
+            {
+                return false;
+            }
+
+            return nonImported.All(r =>
+                r.Errors != null
+                && r.Errors.Count > 0
+                && r.Errors.All(IsAlreadyHaveContentReason));
         }
 
         public bool VerifyImport(TrackedDownload trackedDownload, List<ImportResult> importResults)
