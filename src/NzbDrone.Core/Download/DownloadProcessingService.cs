@@ -44,39 +44,14 @@ namespace NzbDrone.Core.Download
             }
         }
 
-        private void ResetFailedImportsForRetry()
-        {
-            // Move every ImportFailed item back to ImportPending so it gets re-evaluated
-            // on this same Execute() pass. We never delete or stop tracking — if the
-            // failure was permanent (corrupt file, MB really doesn't have the album)
-            // the next attempt will simply land back in ImportFailed. No-op if nothing
-            // failed. Cost is one extra import attempt per failed item per refresh; that's
-            // strictly cheaper than the user re-triggering manually.
-            var failed = _trackedDownloadService.GetTrackedDownloads()
-                                               .Where(t => t.State == TrackedDownloadState.ImportFailed)
-                                               .ToList();
-
-            if (failed.Count == 0)
-            {
-                return;
-            }
-
-            // Single summary line to NLog — don't call trackedDownload.Warn(), which
-            // would surface this transition as a rejection in the queue UI.
-            _logger.Info("Re-queueing {0} previously-failed import(s) for retry with current matching logic.", failed.Count);
-
-            foreach (var trackedDownload in failed)
-            {
-                trackedDownload.State = TrackedDownloadState.ImportPending;
-            }
-        }
-
         public void Execute(ProcessMonitoredDownloadsCommand message)
         {
-            // Reset failed imports BEFORE the main loop so they get re-tried in this same
-            // pass. Any item that fails again will end up back in ImportFailed by the end.
-            ResetFailedImportsForRetry();
-
+            // Reset of ImportFailed -> ImportPending is now triggered only at startup by
+            // AutoRetryFailedImportsOnStartupHandler. Doing it on every refresh caused
+            // thrashing: items that genuinely fail (e.g. partial-import where Lidarr
+            // identified more candidate albums than actually exist) would bounce back to
+            // ImportPending each refresh, the importer would delete and re-copy the same
+            // already-imported files, and disk I/O would loop forever.
             var enableCompletedDownloadHandling = _configService.EnableCompletedDownloadHandling;
             var trackedDownloads = _trackedDownloadService.GetTrackedDownloads()
                                                           .Where(t => t.IsTrackable)

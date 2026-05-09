@@ -54,6 +54,23 @@ namespace NzbDrone.Core.MediaFiles
                 throw new RootFolderNotFoundException($"Root folder '{rootFolder}' was not found.");
             }
 
+            // No-op short-circuit: if there's exactly one existing file, the source path is
+            // also that file (or matches it byte-for-byte by size+mtime), there's nothing
+            // to do. Without this guard, repeated import attempts (which happen freely
+            // when one downloadId expands to many queue records) would delete and re-copy
+            // the same content over and over, generating spurious "Existing track file
+            // missing from disk" warnings as later iterations race against earlier ones.
+            if (existingFiles.Count == 1)
+            {
+                var existing = existingFiles[0].First();
+                if (IsSameFileOnDisk(existing.Path, localTrack.Path, localTrack.Size))
+                {
+                    _logger.Debug("Skipping upgrade: {0} already present at destination with same size/mtime", existing.Path);
+                    moveFileResult.TrackFile = existing;
+                    return moveFileResult;
+                }
+            }
+
             foreach (var existingFile in existingFiles)
             {
                 var file = existingFile.First();
@@ -67,7 +84,11 @@ namespace NzbDrone.Core.MediaFiles
                 }
                 else
                 {
-                    _logger.Warn("Existing track file missing from disk: {0}", trackFilePath);
+                    // Demoted from Warn to Debug: this fires when an earlier iteration in
+                    // the same import batch already deleted the file (multiple queue
+                    // records pointing at the same physical content). Not actionable for
+                    // the user; the new file lands at the destination either way.
+                    _logger.Debug("Existing track file already gone from disk (likely deleted earlier in same import pass): {0}", trackFilePath);
                 }
 
                 moveFileResult.OldFiles.Add(file);
@@ -86,6 +107,34 @@ namespace NzbDrone.Core.MediaFiles
             _audioTagService.WriteTags(trackFile, true);
 
             return moveFileResult;
+        }
+
+        private bool IsSameFileOnDisk(string existingPath, string sourcePath, long sourceSize)
+        {
+            // Same path → trivially the same file. Either way we just placed it; no work to do.
+            if (string.Equals(existingPath, sourcePath, System.StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            // Different paths but same size + matching disk presence is a strong enough
+            // signal for the duplicate-import case (we've already copied this file once
+            // and a second queue record for the same downloadId is asking us to do it
+            // again). We don't hash because tracks can be 30+ MB and this runs in the
+            // hot import loop.
+            if (!_diskProvider.FileExists(existingPath))
+            {
+                return false;
+            }
+
+            try
+            {
+                return _diskProvider.GetFileSize(existingPath) == sourceSize;
+            }
+            catch
+            {
+                return false;
+            }
         }
     }
 }
