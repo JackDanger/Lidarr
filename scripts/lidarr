@@ -3,12 +3,15 @@
 # common queries I keep typing by hand.
 #
 # Subcommands:
+#   summary              One-shot dashboard: queue, recent imports, errors, dups
 #   queue                Counts by status + total
 #   queue-list [N]       Show first N queue items (default 30)
-#   rejections [N]       Top N most-common rejection reasons in queue
+#   dups                 Queue records grouped by downloadId (find duplication)
+#   rejections [N]       Top N normalized rejection reasons (collapses paths/%s)
 #   stuck [N]            Items in ImportFailed for the longest (default 20)
 #   history [N]          Last N history events (default 20)
 #   imports [N]          Last N trackFileImported events
+#   imports-rate         Imports per minute over the last hour
 #   grabs [N]            Last N grabbed (release picked up) events
 #   status               System version + production flag
 #   refresh              POST RefreshMonitoredDownloads
@@ -24,6 +27,36 @@ cmd=${1:-help}
 shift || true
 
 case "$cmd" in
+  summary)
+    # Combined dashboard. Single round trip to /queue + a few aggregations on
+    # /history. Tells you in one glance: where the queue stands, what's churning,
+    # what's failing, whether work is flowing.
+    queue_json=$(lidarr_curl "/queue?pageSize=1000&includeUnknownArtistItems=true")
+    hist_json=$(lidarr_curl "/history?pageSize=500&sortDirection=descending&sortKey=date")
+
+    printf "${C_CYA}=== Service ===${C_RST}\n"
+    lidarr_curl "/system/status" | jq -r '"  v\(.version)  build \(.buildTime)  up since \(.startTime)"'
+
+    printf "\n${C_CYA}=== Queue ===${C_RST}\n"
+    echo "$queue_json" | jq -r '"  total: \(.totalRecords)\n  by status: \(.records | group_by(.status) | map("\(.[0].status)=\(length)") | join(", "))\n  by trackedDownloadState: \(.records | group_by(.trackedDownloadState) | map("\(.[0].trackedDownloadState)=\(length)") | join(", "))\n  distinct downloadIds: \(.records | map(.downloadId) | unique | length)\n  duplication ratio: \(((.records | length) / (.records | map(.downloadId) | unique | length) * 100 | floor) / 100)x"'
+
+    printf "\n${C_CYA}=== Top duplicating downloads (5) ===${C_RST}\n"
+    echo "$queue_json" | jq -r '.records | group_by(.downloadId)
+        | map({n: length, title: .[0].title})
+        | sort_by(-.n) | .[0:5]
+        | .[] | "  \(.n)x  \(.title)"'
+
+    printf "\n${C_CYA}=== Imports per minute (last 30) ===${C_RST}\n"
+    echo "$hist_json" | jq -r '[.records[] | select(.eventType == "trackFileImported") | .date | sub(":\\d+Z$"; "")]
+        | group_by(.) | map({m: .[0], n: length}) | sort_by(.m) | reverse | .[0:30]
+        | reverse | .[] | "  \(.m): \(.n)"'
+
+    printf "\n${C_CYA}=== Top rejection reasons (10, normalized) ===${C_RST}\n"
+    echo "$queue_json" | jq -r '[.records[].statusMessages[]?.messages[]?]
+        | flatten | .[] | sub("\\d+(\\.\\d+)?\\s*%"; "X%"; "g") | sub("\\[.*\\]"; "[…]")' \
+      | sort | uniq -c | sort -rn | head -10 | sed 's/^/  /'
+    ;;
+
   queue)
     lidarr_curl "/queue?pageSize=1000&includeUnknownArtistItems=true" \
       | jq '{
@@ -43,10 +76,33 @@ case "$cmd" in
 
   rejections)
     n=${1:-20}
-    # statusMessages may be missing or empty; flatten and count.
+    # statusMessages may be missing or empty; flatten, normalize ("vs 50%" /
+    # paths in brackets) and count. Without normalization the same logical
+    # rejection appears N times under N slightly different formattings.
     lidarr_curl "/queue?pageSize=1000&includeUnknownArtistItems=true" \
-      | jq -r '.records[] | (.statusMessages // [])[] | (.messages // [])[]' \
+      | jq -r '.records[] | (.statusMessages // [])[] | (.messages // [])[]
+                  | sub("\\d+(\\.\\d+)?\\s*%"; "X%"; "g")
+                  | sub("\\[.*\\]"; "[…]")' \
       | sort | uniq -c | sort -rn | head -"$n"
+    ;;
+
+  dups)
+    # Show queue records grouped by downloadId — surfaces the duplication
+    # problem (one download spawning many queue records).
+    lidarr_curl "/queue?pageSize=1000&includeUnknownArtistItems=true" \
+      | jq -r '.records | group_by(.downloadId)
+                | map({n: length, title: .[0].title, status: .[0].status})
+                | sort_by(-.n)
+                | .[] | "\(.n)\t\(.status)\t\(.title)"' | head -30
+    ;;
+
+  imports-rate)
+    # Per-minute import counts for the last hour. Useful right after a deploy
+    # to see whether new code is causing imports to flow.
+    lidarr_curl "/history?pageSize=500&eventType=3&sortDirection=descending" \
+      | jq -r '[.records[].date | sub(":\\d+Z$"; "")]
+                | group_by(.) | map({m: .[0], n: length}) | sort_by(.m) | reverse
+                | .[0:60] | reverse | .[] | "\(.m)\t\(.n)"'
     ;;
 
   stuck)

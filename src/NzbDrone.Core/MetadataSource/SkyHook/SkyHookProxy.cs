@@ -27,6 +27,13 @@ namespace NzbDrone.Core.MetadataSource.SkyHook
         private readonly IMetadataProfileService _metadataProfileService;
         private readonly ICached<HashSet<string>> _cache;
 
+        // Cache of search keys ("title|artist") whose lookups returned no MB hits. Keeps
+        // hot-loop repeated lookups (multiple queue records pointing at the same physical
+        // download → repeated identification attempts) from hammering the metadata API
+        // for albums that genuinely don't exist in MB (live recordings, demos, bootlegs).
+        // TTL is set per-Get; restarts clear the cache so users can force a refresh.
+        private readonly ICached<bool> _negativeSearchCache;
+
         private static readonly List<string> NonAudioMedia = new List<string> { "DVD", "DVD-Video", "Blu-ray", "HD-DVD", "VCD", "SVCD", "UMD", "VHS" };
         private static readonly List<string> SkippedTracks = new List<string> { "[data track]" };
 
@@ -44,6 +51,7 @@ namespace NzbDrone.Core.MetadataSource.SkyHook
             _artistService = artistService;
             _albumService = albumService;
             _cache = cacheManager.GetCache<HashSet<string>>(GetType());
+            _negativeSearchCache = cacheManager.GetCache<bool>(GetType(), "negativeSearch");
             _logger = logger;
         }
 
@@ -414,19 +422,44 @@ namespace NzbDrone.Core.MetadataSource.SkyHook
                     }
                 }
 
+                var trimmedTitle = title.ToLower().Trim();
+                var trimmedArtist = artist.IsNotNullOrWhiteSpace() ? artist.ToLower().Trim() : string.Empty;
+                var cacheKey = $"{trimmedTitle}|{trimmedArtist}";
+
+                // Negative-result short-circuit. If we recently looked this exact pair up
+                // and got nothing back, return empty without an HTTP call. Saves the API
+                // round-trip and keeps the metadata service from rate-limiting us when
+                // hundreds of queue records re-attempt identification on the same content.
+                if (_negativeSearchCache.Find(cacheKey))
+                {
+                    _logger.Debug("Skipping known-empty search: {0} by {1}", title, artist);
+                    return new List<Album>();
+                }
+
                 var httpRequest = _requestBuilder.GetRequestBuilder().Create()
                                     .SetSegment("route", "search")
                                     .AddQueryParam("type", "album")
-                                    .AddQueryParam("query", title.ToLower().Trim())
-                                    .AddQueryParam("artist", artist.IsNotNullOrWhiteSpace() ? artist.ToLower().Trim() : string.Empty)
+                                    .AddQueryParam("query", trimmedTitle)
+                                    .AddQueryParam("artist", trimmedArtist)
                                     .AddQueryParam("includeTracks", "1")
                                     .Build();
 
                 var httpResponse = await _httpClient.GetAsync<List<AlbumResource>>(httpRequest);
 
-                return httpResponse.Resource.Select(MapSearchResult)
+                var results = httpResponse.Resource.Select(MapSearchResult)
                     .Where(x => x != null)
                     .ToList();
+
+                if (results.Count == 0)
+                {
+                    // Cache the empty result for a while. 30 minutes is long enough to
+                    // suppress the in-session retry storm (queue refresh interval is ~8m,
+                    // so a few cycles will hit the cache) but short enough that adding
+                    // the album in MB and triggering a manual refresh works as expected.
+                    _negativeSearchCache.Set(cacheKey, true, TimeSpan.FromMinutes(30));
+                }
+
+                return results;
             }
             catch (HttpException ex)
             {
