@@ -44,14 +44,44 @@ namespace NzbDrone.Core.Download
             }
         }
 
+        private void ResetFailedImportsForRetry()
+        {
+            // Move ImportFailed -> ImportPending so failures get a second pass under the
+            // current matching code. This used to cause file-level thrashing (delete +
+            // re-copy of identical content every refresh) — that's now prevented by the
+            // idempotency guard in UpgradeMediaFileService.UpgradeTrackFile, so the
+            // reset is safe to run every pass.
+            //
+            // The startup handler also kicks a reset, but it can fire before the
+            // TrackedDownload cache is populated from the download client; this in-loop
+            // call is the reliable trigger.
+            var failed = _trackedDownloadService.GetTrackedDownloads()
+                                               .Where(t => t.State == TrackedDownloadState.ImportFailed)
+                                               .ToList();
+
+            if (failed.Count == 0)
+            {
+                return;
+            }
+
+            // Single summary line — don't call trackedDownload.Warn(), which would
+            // surface this state transition in the queue UI as if it were a rejection.
+            _logger.Info("Re-queueing {0} previously-failed import(s) for retry with current matching logic.", failed.Count);
+
+            foreach (var trackedDownload in failed)
+            {
+                trackedDownload.State = TrackedDownloadState.ImportPending;
+            }
+        }
+
         public void Execute(ProcessMonitoredDownloadsCommand message)
         {
-            // Reset of ImportFailed -> ImportPending is now triggered only at startup by
-            // AutoRetryFailedImportsOnStartupHandler. Doing it on every refresh caused
-            // thrashing: items that genuinely fail (e.g. partial-import where Lidarr
-            // identified more candidate albums than actually exist) would bounce back to
-            // ImportPending each refresh, the importer would delete and re-copy the same
-            // already-imported files, and disk I/O would loop forever.
+            // Reset failed imports first so they're re-evaluated in this same pass.
+            // Idempotent at the file level thanks to UpgradeTrackFile's same-content
+            // short-circuit — items that genuinely have nothing new to import become
+            // a CPU-only no-op rather than a disk-thrash loop.
+            ResetFailedImportsForRetry();
+
             var enableCompletedDownloadHandling = _configService.EnableCompletedDownloadHandling;
             var trackedDownloads = _trackedDownloadService.GetTrackedDownloads()
                                                           .Where(t => t.IsTrackable)
