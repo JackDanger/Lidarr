@@ -11,6 +11,7 @@ using NzbDrone.Core.Download.TrackedDownloads;
 using NzbDrone.Core.History;
 using NzbDrone.Core.MediaFiles;
 using NzbDrone.Core.MediaFiles.Events;
+using NzbDrone.Core.MediaFiles.Extraction;
 using NzbDrone.Core.MediaFiles.TrackImport;
 using NzbDrone.Core.Messaging.Events;
 using NzbDrone.Core.Music;
@@ -34,6 +35,7 @@ namespace NzbDrone.Core.Download
         private readonly IProvideImportItemService _provideImportItemService;
         private readonly IParsingService _parsingService;
         private readonly ITrackedDownloadAlreadyImported _trackedDownloadAlreadyImported;
+        private readonly IExtractionService _extractionService;
         private readonly Logger _logger;
 
         public CompletedDownloadService(IEventAggregator eventAggregator,
@@ -43,6 +45,7 @@ namespace NzbDrone.Core.Download
                                         IArtistService artistService,
                                         IParsingService parsingService,
                                         ITrackedDownloadAlreadyImported trackedDownloadAlreadyImported,
+                                        IExtractionService extractionService,
                                         Logger logger)
         {
             _eventAggregator = eventAggregator;
@@ -52,6 +55,7 @@ namespace NzbDrone.Core.Download
             _artistService = artistService;
             _parsingService = parsingService;
             _trackedDownloadAlreadyImported = trackedDownloadAlreadyImported;
+            _extractionService = extractionService;
             _logger = logger;
         }
 
@@ -151,6 +155,13 @@ namespace NzbDrone.Core.Download
 
                 return;
             }
+
+            // Extract any archives we recognise BEFORE setting Importing state and BEFORE
+            // ProcessPath scans for audio. The marker file convention makes this idempotent
+            // across refreshes; on the first pass after a .tar lands, audio appears for
+            // free. See src/NzbDrone.Core/MediaFiles/Extraction/ExtractionService.cs.
+            var preExtractOutput = trackedDownload.ImportItem.OutputPath.FullPath;
+            _extractionService.ExtractIfNeeded(preExtractOutput);
 
             trackedDownload.State = TrackedDownloadState.Importing;
 
