@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using NLog;
 using NzbDrone.Core.Download;
 using NzbDrone.Core.Download.TrackedDownloads;
@@ -12,12 +13,26 @@ using NzbDrone.Core.Messaging.Events;
 
 namespace NzbDrone.Core.MediaFiles.TrackImport
 {
-    public class AutoRetryFailedImportsOnStartupHandler : IHandle<ApplicationStartedEvent>
+    public class AutoRetryFailedImportsOnStartupHandler : IHandle<ApplicationStartedEvent>, IHandle<TrackedDownloadRefreshedEvent>
     {
         private readonly Logger _logger;
         private readonly IManageCommandQueue _commandQueueManager;
         private readonly ICommandRepository _commandRepository;
         private readonly ITrackedDownloadService _trackedDownloadService;
+
+        // The reset has to fire after the TrackedDownload cache has been populated
+        // from the download client, but before any per-refresh `Execute()` pass walks
+        // it. ApplicationStartedEvent is too early — the cache is still empty —
+        // and TrackedDownloadRefreshedEvent fires immediately after Refresh()
+        // populates it (and just before Refresh() pushes ProcessMonitoredDownloads).
+        // We listen for the latter, run the reset once, then never again. Per-refresh
+        // resetting was option A in the design — discarded because the items that
+        // currently land in ImportFailed aren't ones repeated immediate retry can
+        // help (artist mismatch, score-too-low, etc.); they need external state to
+        // change before they could succeed. Restart is the natural trigger for
+        // "external state changed" in our workflow (lidarr-deploy restarts every
+        // time we change matching code).
+        private int _resetFired;
 
         public AutoRetryFailedImportsOnStartupHandler(Logger logger,
                                                      IManageCommandQueue commandQueueManager,
@@ -34,12 +49,11 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
         {
             _logger.Info("Initializing improved import matching system on startup.");
 
-            // One-shot: reset every ImportFailed item back to ImportPending so the very
-            // next refresh re-evaluates them under the current matching code. This is the
-            // mechanism by which a code-change deploy applies to the existing backlog.
-            // Doing this on every refresh (instead of only on startup) caused thrashing
-            // for items whose import is permanently partial.
-            ResetFailedImportsForRetry();
+            // The reset deliberately doesn't run here — TrackedDownloadService's
+            // cache is empty until the first Refresh populates it from the
+            // download client. We schedule that refresh below, then catch
+            // TrackedDownloadRefreshedEvent (handler below) to do the reset
+            // exactly once with a populated cache.
 
             // Find all pending manual import commands that need to be retried
             var pendingManualImports = GetPendingManualImports();
@@ -75,6 +89,21 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
             // Also trigger refresh of monitored downloads to re-import failed items with improved logic
             _logger.Info("Triggering refresh of monitored downloads to retry failed imports with improved matching.");
             _commandQueueManager.Push(new RefreshMonitoredDownloadsCommand(), CommandPriority.High);
+        }
+
+        public void Handle(TrackedDownloadRefreshedEvent message)
+        {
+            // Fire the reset exactly once, on the first refresh after process start.
+            // Subsequent refreshes (which happen every ~8 minutes via the scheduled
+            // RefreshMonitoredDownloads command, plus on any user-triggered refresh)
+            // are no-ops here — items in ImportFailed stay there until the next
+            // Lidarr restart, which is when our matching code can have changed.
+            if (Interlocked.Exchange(ref _resetFired, 1) != 0)
+            {
+                return;
+            }
+
+            ResetFailedImportsForRetry();
         }
 
         private void ResetFailedImportsForRetry()

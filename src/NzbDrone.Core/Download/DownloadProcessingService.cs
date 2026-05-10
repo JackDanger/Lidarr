@@ -44,43 +44,17 @@ namespace NzbDrone.Core.Download
             }
         }
 
-        private void ResetFailedImportsForRetry()
-        {
-            // Move ImportFailed -> ImportPending so failures get a second pass under the
-            // current matching code. This used to cause file-level thrashing (delete +
-            // re-copy of identical content every refresh) — that's now prevented by the
-            // idempotency guard in UpgradeMediaFileService.UpgradeTrackFile, so the
-            // reset is safe to run every pass.
-            //
-            // The startup handler also kicks a reset, but it can fire before the
-            // TrackedDownload cache is populated from the download client; this in-loop
-            // call is the reliable trigger.
-            var failed = _trackedDownloadService.GetTrackedDownloads()
-                                               .Where(t => t.State == TrackedDownloadState.ImportFailed)
-                                               .ToList();
-
-            if (failed.Count == 0)
-            {
-                return;
-            }
-
-            // Single summary line — don't call trackedDownload.Warn(), which would
-            // surface this state transition in the queue UI as if it were a rejection.
-            _logger.Info("Re-queueing {0} previously-failed import(s) for retry with current matching logic.", failed.Count);
-
-            foreach (var trackedDownload in failed)
-            {
-                trackedDownload.State = TrackedDownloadState.ImportPending;
-            }
-        }
-
         public void Execute(ProcessMonitoredDownloadsCommand message)
         {
-            // Reset failed imports first so they're re-evaluated in this same pass.
-            // Idempotent at the file level thanks to UpgradeTrackFile's same-content
-            // short-circuit — items that genuinely have nothing new to import become
-            // a CPU-only no-op rather than a disk-thrash loop.
-            ResetFailedImportsForRetry();
+            // Note: this method used to reset every ImportFailed download back to
+            // ImportPending here at the top of each pass. That moved to a one-shot
+            // hook on TrackedDownloadRefreshedEvent in
+            // AutoRetryFailedImportsOnStartupHandler — the items that currently land
+            // in ImportFailed (artist mismatch / score-too-low / etc.) won't pass
+            // the same matching code on retry, so per-refresh re-attempts were just
+            // burning identification cycles. They'll be re-evaluated once per Lidarr
+            // restart, which is when our matching code can plausibly have changed.
+            // See docs/tracked-download-state-machine.md for the full rationale.
 
             var enableCompletedDownloadHandling = _configService.EnableCompletedDownloadHandling;
             var trackedDownloads = _trackedDownloadService.GetTrackedDownloads()

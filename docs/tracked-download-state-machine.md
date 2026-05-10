@@ -111,10 +111,12 @@ added; **`✗`** marks a known violation/wart documented below.
        │     └─ otherwise → ImportFailed                                │
        │                       │                                        │
        │                       │ ▶ ResetFailedImportsForRetry           │
-       │                       │   every Execute pass                   │
+       │                       │   ONCE per startup (hook on first      │
+       │                       │   TrackedDownloadRefreshedEvent), not  │
+       │                       │   every Execute pass — V2 fixed by     │
+       │                       │   trigger-based retry (option B).      │
        │                       ▼                                        │
        │                ImportPending  ───────────────────────────────►─┤
-       │                ✗ V2: unbounded retry, no backoff (open issue)  │
 
        ┌───────────────┐  (terminal, untrackable)
        │   Imported    │  also: RemoveCompletedDownloads triggers
@@ -149,10 +151,9 @@ Three places reset state from outside the normal Import → result classificatio
 
 | Caller | Transition | Trigger |
 |---|---|---|
-| `DownloadProcessingService.ResetFailedImportsForRetry` (L47) | `ImportFailed` → `ImportPending` | Every `Execute` pass — top of `ProcessMonitoredDownloadsCommand` |
-| `DownloadProcessingService.Execute` "normalize Importing" (L94-101) | `Importing` (DC=Completed) → `ImportPending` | Top of every `Execute` pass — recovers items left mid-Import by a previous crash |
-| `DownloadProcessingService.Execute` catch (L118-122) | `Importing` → `ImportPending` | Exception thrown inside `Import()` |
-| `AutoRetryFailedImportsOnStartupHandler.ResetFailedImportsForRetry` (L85) | `ImportFailed` → `ImportPending` | `ApplicationStartedEvent` — **fires before TrackedDownload cache is populated, so usually a no-op**; the in-loop reset above is what actually drains ImportFailed after a deploy |
+| `DownloadProcessingService.Execute` "normalize Importing" | `Importing` (DC=Completed) → `ImportPending` | Top of every `Execute` pass — recovers items left mid-Import by a previous crash |
+| `DownloadProcessingService.Execute` catch | `Importing` → `ImportPending` | Exception thrown inside `Import()` |
+| `AutoRetryFailedImportsOnStartupHandler.Handle(TrackedDownloadRefreshedEvent)` | `ImportFailed` → `ImportPending` | Once per process start, on the **first** `TrackedDownloadRefreshedEvent` after `ApplicationStartedEvent`. Guarded by `Interlocked.Exchange` — subsequent refreshes are no-ops. Replaces the old per-Execute reset (V2 / option B). |
 
 ## Known violations / warts
 
@@ -166,13 +167,16 @@ Three places reset state from outside the normal Import → result classificatio
   recovers across crashes. Documented as an invariant at the top of
   `Import` so future edits don't introduce a "leaks Importing" path.
 
-- **V2: `ImportFailed` retries with no backoff.** Every refresh,
-  `ResetFailedImportsForRetry` moves all `ImportFailed` → `ImportPending`.
-  Items that fail for a "fixable" reason (album-match-not-close-enough at 17%,
-  destination already exists, etc.) almost certainly fail the same way next
-  time. With our `UpgradeTrackFile` idempotency this is CPU-only, but it's
-  still ~10 items × identification work × every refresh forever. **Open —
-  needs a per-item attempt counter or last-attempt timestamp.**
+- **~~V2~~ (fixed): `ImportFailed` was being unconditionally retried every
+  refresh.** Replaced with trigger-based reset — once per process start,
+  on the first `TrackedDownloadRefreshedEvent` (when the cache is populated
+  from the download client). Rationale: the items that currently land in
+  `ImportFailed` (artist mismatch, score-too-low, .iso, etc.) won't pass
+  the same matching code on retry. They'd only succeed if either (a) we
+  changed matching code, or (b) MusicBrainz gained an entry. (a) is bound
+  to a Lidarr restart in our workflow (`lidarr-deploy` always restarts);
+  (b) is rare enough that "wait until the next restart" is a fine cadence.
+  See option B in the V2 design discussion.
 
 - **~~V3~~ (fixed):** "Empty importResults" used to leave state at
   `ImportPending` and loop forever. `ClassifyAndSetState` now sets
@@ -196,9 +200,10 @@ Three places reset state from outside the normal Import → result classificatio
   The original `ImportBlocked` cases (artist mismatch, unable to parse) are
   still re-checked, which is desired (user might fix them).
 
-- **V7: AutoRetryFailedImportsOnStartupHandler is timing-sensitive.** Fires on
-  `ApplicationStartedEvent` but the `TrackedDownloadService` cache is empty
-  until the first `RefreshMonitoredDownloads` populates it. The
-  `DownloadProcessingService` in-loop reset is what actually does the work;
-  the startup-handler call is now a no-op safety net (left in place because
-  in some restart-timing scenarios the cache *is* warm and it does fire).
+- **~~V7~~ (fixed):** AutoRetryFailedImportsOnStartupHandler now listens for
+  `TrackedDownloadRefreshedEvent` (which fires immediately *after* the cache
+  is populated and immediately *before* the next `Execute` pass) instead of
+  trying to do its work on `ApplicationStartedEvent` (when the cache is still
+  empty). The handler still reacts to `ApplicationStartedEvent` for the
+  unrelated startup work (logging, RescanFolders, queueing the first
+  RefreshMonitoredDownloads), but the reset itself is in the right place.
