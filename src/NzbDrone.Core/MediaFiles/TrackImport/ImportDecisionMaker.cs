@@ -2,7 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.IO.Abstractions;
 using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
 using NLog;
+using NzbDrone.Common.Cache;
 using NzbDrone.Common.Extensions;
 using NzbDrone.Common.Instrumentation.Extensions;
 using NzbDrone.Core.DecisionEngine;
@@ -55,6 +58,16 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
         private readonly IQualityProfileService _qualityProfileService;
         private readonly Logger _logger;
 
+        // Cache of GetImportDecisions results keyed by (file paths + sizes + mtimes +
+        // overrides + config). Auto-import normally runs full identification when a
+        // download completes; opening the manual-import modal seconds-to-minutes later
+        // would otherwise repeat the same ~10s of work. The cache lets the modal serve
+        // from the freshly-computed result instead. Cache invalidates automatically
+        // when any file in the folder changes (mtime/size in the key) and on Lidarr
+        // restart (in-memory).
+        private readonly ICached<List<ImportDecision<LocalTrack>>> _decisionCache;
+        private static readonly TimeSpan _decisionCacheTtl = TimeSpan.FromHours(2);
+
         public ImportDecisionMaker(IEnumerable<IImportDecisionEngineSpecification<LocalTrack>> trackSpecifications,
                                    IEnumerable<IImportDecisionEngineSpecification<LocalAlbumRelease>> albumSpecifications,
                                    IMediaFileService mediaFileService,
@@ -63,6 +76,7 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
                                    IIdentificationService identificationService,
                                    IRootFolderService rootFolderService,
                                    IQualityProfileService qualityProfileService,
+                                   ICacheManager cacheManager,
                                    Logger logger)
         {
             _trackSpecifications = trackSpecifications;
@@ -73,6 +87,7 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
             _identificationService = identificationService;
             _rootFolderService = rootFolderService;
             _qualityProfileService = qualityProfileService;
+            _decisionCache = cacheManager.GetCache<List<ImportDecision<LocalTrack>>>(GetType(), "decisions");
             _logger = logger;
         }
 
@@ -144,6 +159,25 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
             idOverrides ??= new IdentificationOverrides();
             itemInfo ??= new ImportDecisionMakerInfo();
 
+            // Cache lookup: build a key from the inputs that determine the result, then
+            // return any cached value. We don't cache when files is empty (no benefit)
+            // or when identification overrides force a specific Artist/Album/Release
+            // (those calls are usually one-off interactive selections where the user
+            // expects fresh evaluation). Cache hits are lifecycle-safe: the decisions'
+            // referenced LocalTrack/Album/AlbumRelease entities were materialized on
+            // the original computation pass; they're plain CLR objects we can replay.
+            string cacheKey = null;
+            if (musicFiles.Count > 0 && idOverrides.Artist == null && idOverrides.Album == null && idOverrides.AlbumRelease == null)
+            {
+                cacheKey = BuildDecisionCacheKey(musicFiles, idOverrides, config);
+                var cached = _decisionCache.Find(cacheKey);
+                if (cached != null)
+                {
+                    _logger.Debug("Returning {0} cached decisions for {1} files (key {2}…)", cached.Count, musicFiles.Count, cacheKey.Substring(0, 8));
+                    return cached;
+                }
+            }
+
             var trackData = GetLocalTracks(musicFiles, itemInfo.DownloadClientItem, itemInfo.ParsedAlbumInfo, config.Filter);
             var localTracks = trackData.Item1;
             var decisions = trackData.Item2;
@@ -194,7 +228,41 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
                 }
             }
 
+            if (cacheKey != null)
+            {
+                _decisionCache.Set(cacheKey, decisions, _decisionCacheTtl);
+            }
+
             return decisions;
+        }
+
+        // Cache key reflects every input that influences the decision result. File
+        // path + length + mtime catches both "file changed" and "file replaced". Config
+        // flags catch the toggles (NewDownload, IncludeExisting, etc.) that change spec
+        // outcomes. We deliberately ignore itemInfo.DownloadClientItem and
+        // itemInfo.ParsedAlbumInfo: the same physical files keyed identically should
+        // yield the same decisions regardless of which queue record asked.
+        private static string BuildDecisionCacheKey(List<IFileInfo> files, IdentificationOverrides overrides, ImportDecisionMakerConfig config)
+        {
+            var sb = new StringBuilder();
+
+            foreach (var f in files.OrderBy(x => x.FullName, StringComparer.OrdinalIgnoreCase))
+            {
+                sb.Append(f.FullName).Append('|')
+                  .Append(f.Length).Append('|')
+                  .Append(f.LastWriteTimeUtc.Ticks).Append('\n');
+            }
+
+            sb.Append("cfg|")
+              .Append((int)config.Filter).Append('|')
+              .Append(config.NewDownload ? '1' : '0').Append('|')
+              .Append(config.SingleRelease ? '1' : '0').Append('|')
+              .Append(config.IncludeExisting ? '1' : '0').Append('|')
+              .Append(config.AddNewArtists ? '1' : '0');
+
+            using var sha = SHA1.Create();
+            var hash = sha.ComputeHash(Encoding.UTF8.GetBytes(sb.ToString()));
+            return Convert.ToHexString(hash);
         }
 
         private void EnsureData(LocalAlbumRelease release)
