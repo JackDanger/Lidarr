@@ -160,20 +160,25 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
             itemInfo ??= new ImportDecisionMakerInfo();
 
             // Cache lookup: build a key from the inputs that determine the result, then
-            // return any cached value. We don't cache when files is empty (no benefit)
-            // or when identification overrides force a specific Artist/Album/Release
-            // (those calls are usually one-off interactive selections where the user
-            // expects fresh evaluation). Cache hits are lifecycle-safe: the decisions'
-            // referenced LocalTrack/Album/AlbumRelease entities were materialized on
-            // the original computation pass; they're plain CLR objects we can replay.
+            // return any cached value. Skip the cache only when the caller has supplied
+            // an Album or AlbumRelease override — those come from interactive UI clicks
+            // ("use THIS specific album/release") where the user is *asking* for a
+            // re-evaluation. An Artist override alone is fine to cache: both auto-import
+            // and the manual modal derive Artist deterministically from the folder name,
+            // so it's effectively part of the input. Files-empty calls aren't cached
+            // (nothing to compute, nothing to skip).
+            //
+            // Cache hits are lifecycle-safe: the cached decisions' referenced
+            // LocalTrack/Album/AlbumRelease values were materialized on the original
+            // computation pass and are plain CLR objects.
             string cacheKey = null;
-            if (musicFiles.Count > 0 && idOverrides.Artist == null && idOverrides.Album == null && idOverrides.AlbumRelease == null)
+            if (musicFiles.Count > 0 && idOverrides.Album == null && idOverrides.AlbumRelease == null)
             {
                 cacheKey = BuildDecisionCacheKey(musicFiles, idOverrides, config);
                 var cached = _decisionCache.Find(cacheKey);
                 if (cached != null)
                 {
-                    _logger.Debug("Returning {0} cached decisions for {1} files (key {2}…)", cached.Count, musicFiles.Count, cacheKey.Substring(0, 8));
+                    _logger.Info("Cache hit: returning {0} cached import decisions for {1} files (key {2}…)", cached.Count, musicFiles.Count, cacheKey.Substring(0, 8));
                     return cached;
                 }
             }
@@ -239,9 +244,11 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
         // Cache key reflects every input that influences the decision result. File
         // path + length + mtime catches both "file changed" and "file replaced". Config
         // flags catch the toggles (NewDownload, IncludeExisting, etc.) that change spec
-        // outcomes. We deliberately ignore itemInfo.DownloadClientItem and
-        // itemInfo.ParsedAlbumInfo: the same physical files keyed identically should
-        // yield the same decisions regardless of which queue record asked.
+        // outcomes. Artist override is included because the *same* files in the *same*
+        // folder could be processed under different artist contexts (rare, but
+        // possible). We deliberately ignore itemInfo.DownloadClientItem and
+        // itemInfo.ParsedAlbumInfo: those don't change the spec evaluation, only
+        // metadata attached to the result.
         private static string BuildDecisionCacheKey(List<IFileInfo> files, IdentificationOverrides overrides, ImportDecisionMakerConfig config)
         {
             var sb = new StringBuilder();
@@ -258,7 +265,8 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
               .Append(config.NewDownload ? '1' : '0').Append('|')
               .Append(config.SingleRelease ? '1' : '0').Append('|')
               .Append(config.IncludeExisting ? '1' : '0').Append('|')
-              .Append(config.AddNewArtists ? '1' : '0');
+              .Append(config.AddNewArtists ? '1' : '0').Append('\n')
+              .Append("artist|").Append(overrides?.Artist?.Id ?? 0);
 
             using var sha = SHA1.Create();
             var hash = sha.ComputeHash(Encoding.UTF8.GetBytes(sb.ToString()));
