@@ -68,8 +68,11 @@ namespace NzbDrone.Core.MediaFiles.Extraction
                     return true;
                 }
 
-                _logger.Warn("unrar exited {0} for {1}: {2}",
-                    output.ExitCode, archivePath, output.Lines);
+                _logger.Warn(
+                    "unrar exited {0} for {1}: {2}",
+                    output.ExitCode,
+                    archivePath,
+                    output.Lines);
                 return false;
             }
             catch (Exception ex)
@@ -84,6 +87,7 @@ namespace NzbDrone.Core.MediaFiles.Extraction
             try
             {
                 var probe = _processProvider.StartAndCapture("unrar", "-h");
+
                 // unrar prints help on stderr and exits non-zero with no args; just
                 // confirm the binary is on PATH (no exception thrown).
                 return probe != null;

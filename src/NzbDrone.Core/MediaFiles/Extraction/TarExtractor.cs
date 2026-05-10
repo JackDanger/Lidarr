@@ -1,6 +1,6 @@
 using System;
-using System.IO;
 using System.Formats.Tar;
+using System.IO;
 using System.IO.Compression;
 using NLog;
 
