@@ -176,6 +176,16 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Manual
 
             var artistFiles = _diskScanService.GetAudioFiles(folder).ToList();
 
+            // No audio files at all → don't return empty (the modal would say "No audio
+            // files found" and the user has no idea what's actually in the folder).
+            // Surface every non-audio file with a descriptive rejection so the user can
+            // see whether it's an archive that needs extracting, a Blu-ray ISO, a video,
+            // a `.nzb` leftover, etc. — and decide what to do.
+            if (artistFiles.Count == 0)
+            {
+                return BuildNonAudioInventory(folder, downloadId, replaceExistingFiles);
+            }
+
             if (artist == null && artistFiles.Count > 100)
             {
                 _logger.Warn("Unable to determine artist from folder name and found more than 100 files. Skipping parsing");
@@ -232,6 +242,126 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Manual
 
             return items;
         }
+
+        // Folder had no audio files. Walk the directory and surface every other file
+        // with a descriptive rejection so the user can see what they're dealing with —
+        // archive that needs extracting, Blu-ray ISO, video file, .nzb leftover, etc.
+        // Cheap: a single recursive directory listing, no tag reading, no MB lookups.
+        // Returns at most ~200 entries to keep the modal usable for pathological folders
+        // (Blu-ray BDMV trees can have hundreds of small files).
+        private List<ManualImportItem> BuildNonAudioInventory(string folder, string downloadId, bool replaceExistingFiles)
+        {
+            const int maxItems = 200;
+
+            List<string> allFiles;
+            try
+            {
+                allFiles = _diskProvider.GetFiles(folder, true).ToList();
+            }
+            catch (DirectoryNotFoundException)
+            {
+                return new List<ManualImportItem>();
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return new List<ManualImportItem>();
+            }
+
+            if (allFiles == null || allFiles.Count == 0)
+            {
+                _logger.Debug("Folder {0} contains no files at all", folder);
+                return new List<ManualImportItem>();
+            }
+
+            var items = new List<ManualImportItem>(Math.Min(allFiles.Count, maxItems));
+            var truncatedCount = Math.Max(0, allFiles.Count - maxItems);
+
+            foreach (var path in allFiles.OrderBy(p => p, StringComparer.OrdinalIgnoreCase))
+            {
+                if (items.Count >= maxItems)
+                {
+                    items.Add(new ManualImportItem
+                    {
+                        Id = HashConverter.GetHashInt31(folder + "/__truncated__"),
+                        DownloadId = downloadId,
+                        Path = folder,
+                        Name = $"... and {truncatedCount} more files (not shown)",
+                        Size = 0,
+                        Rejections = new List<Rejection> { new Rejection("Truncated for display") },
+                        ReplaceExistingFiles = replaceExistingFiles
+                    });
+                    break;
+                }
+
+                long size;
+                try
+                {
+                    size = _diskProvider.GetFileSize(path);
+                }
+                catch
+                {
+                    size = 0;
+                }
+
+                items.Add(new ManualImportItem
+                {
+                    Id = HashConverter.GetHashInt31(path),
+                    DownloadId = downloadId,
+                    Path = path,
+                    Name = Path.GetFileName(path),
+                    Size = size,
+                    Rejections = new List<Rejection> { new Rejection(DescribeNonAudioFile(path)) },
+                    ReplaceExistingFiles = replaceExistingFiles
+                });
+            }
+
+            _logger.Debug("Folder {0} had no audio files; returning {1} non-audio entries for manual inspection", folder, items.Count);
+            return items;
+        }
+
+        private static string DescribeNonAudioFile(string path)
+        {
+            var ext = Path.GetExtension(path);
+
+            if (FileExtensions.ArchiveExtensions.Contains(ext))
+            {
+                return $"Archive file ({ext}) — extract before importing";
+            }
+
+            if (FileExtensions.ExecutableExtensions.Contains(ext))
+            {
+                return $"Executable file ({ext}) — not safe to import";
+            }
+
+            if (string.Equals(ext, ".iso", StringComparison.OrdinalIgnoreCase))
+            {
+                return "ISO disc image — extract or mount before importing";
+            }
+
+            if (_videoExtensions.Contains(ext))
+            {
+                return $"Video file ({ext}) — Lidarr only imports audio";
+            }
+
+            if (_metadataExtensions.Contains(ext))
+            {
+                return $"Metadata/sidecar file ({ext}) — nothing to import";
+            }
+
+            return string.IsNullOrEmpty(ext)
+                ? "File has no extension — Lidarr can't determine its type"
+                : $"Unsupported file type: {ext}";
+        }
+
+        private static readonly HashSet<string> _videoExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ".mp4", ".mkv", ".avi", ".mov", ".m4v", ".webm", ".wmv", ".flv", ".mpg", ".mpeg", ".ts", ".m2ts", ".vob", ".bdmv", ".clpi", ".mpls"
+        };
+
+        private static readonly HashSet<string> _metadataExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ".nzb", ".torrent", ".par2", ".sfv", ".nfo", ".m3u", ".m3u8", ".cue", ".log", ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".pdf", ".txt", ".xml", ".bdjo", ".bdj"
+        };
 
         public List<ManualImportItem> UpdateItems(List<ManualImportItem> items)
         {
