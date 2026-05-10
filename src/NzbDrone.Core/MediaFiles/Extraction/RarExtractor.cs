@@ -57,11 +57,12 @@ namespace NzbDrone.Core.MediaFiles.Extraction
         {
             try
             {
-                // unrar x  -y     extract with full paths, assume yes to all prompts
-                //          -o+    overwrite existing files
-                // Path the destination ends with a slash so unrar treats it as a directory.
+                // `unrar x -y <archive> <dest>/` — extract with full paths, assume yes
+                // to prompts, destination trailing-slash makes unrar treat it as dir.
+                // Note: unrar-free (Debian default) doesn't recognise `-o+`, but it
+                // overwrites by default; the proprietary unrar accepts both.
                 var destWithSlash = destinationFolder.TrimEnd('/', '\\') + Path.DirectorySeparatorChar;
-                var args = $"x -y -o+ \"{archivePath}\" \"{destWithSlash}\"";
+                var args = $"x -y \"{archivePath}\" \"{destWithSlash}\"";
                 var output = _processProvider.StartAndCapture("unrar", args);
                 if (output.ExitCode == 0)
                 {
@@ -82,20 +83,38 @@ namespace NzbDrone.Core.MediaFiles.Extraction
             }
         }
 
-        private bool ProbeAvailable()
+        // Cheap PATH walk to confirm `unrar` is callable. Avoids invoking the binary
+        // (any invocation produces stderr that shows up as Error log lines) and
+        // covers both proprietary `unrar` and Debian's `unrar-free`.
+        private static bool ProbeAvailable()
         {
-            try
-            {
-                var probe = _processProvider.StartAndCapture("unrar", "-h");
-
-                // unrar prints help on stderr and exits non-zero with no args; just
-                // confirm the binary is on PATH (no exception thrown).
-                return probe != null;
-            }
-            catch (Exception)
+            var pathEnv = Environment.GetEnvironmentVariable("PATH");
+            if (string.IsNullOrEmpty(pathEnv))
             {
                 return false;
             }
+
+            foreach (var dir in pathEnv.Split(Path.PathSeparator))
+            {
+                if (string.IsNullOrWhiteSpace(dir))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    if (File.Exists(Path.Combine(dir, "unrar")))
+                    {
+                        return true;
+                    }
+                }
+                catch (Exception)
+                {
+                    // Bad entry in PATH; ignore and continue.
+                }
+            }
+
+            return false;
         }
     }
 }
