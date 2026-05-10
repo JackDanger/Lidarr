@@ -349,20 +349,25 @@ namespace NzbDrone.Core.Download
         }
 
         // Look at the StatusMessages currently attached to the tracked download (these
-        // are what the importer most recently put on it). Return true iff every Title
-        // and Messages entry matches one of:
+        // are what the importer most recently put on it). Return true iff every reason
+        // we can find matches one of:
         //   - _alreadyHaveContentPrefixes ("we have it" — would be Imported, not Blocked)
         //   - _unfindableInMetadataPrefixes ("MB doesn't have this album yet")
         //   - _persistentImportFailurePrefixes ("nothing on disk for us to import")
         // AND at least one is a real blocker (not just "already have it"). Used to keep
         // Check from re-entering the import pipeline for items we've already classified
-        // as can't-auto-resolve. Without this, the V5/V3 cases bounce ImportBlocked →
+        // as can't-auto-resolve. Without this, V5/V3 cases bounce ImportBlocked →
         // ImportPending forever (~50 cycles per Execute pass were observed).
         //
-        // Why both Title and Messages: V3 (Warn(format,args)) puts the reason in
-        // Messages with Title=DownloadItem.Title, but V5 (Warn(TrackedDownloadStatusMessage(error,[])))
-        // puts the reason in Title with empty Messages. Different code paths, same
-        // user-facing intent — both need to be recognised.
+        // Title vs Messages: per StatusMessage, Title is a *label* and Messages are the
+        // *reasons*. Three patterns we recognise:
+        //   - V3:  Title=DownloadItem.Title, Messages=["No files found..."]
+        //   - V5:  Title="Found archive file...", Messages=[]   (label-as-reason)
+        //   - V6:  Title=filename.flac, Messages=["Couldn't find similar album..."]
+        //          (with a leading "One or more tracks expected..." parent header group)
+        // So: when Messages is non-empty, the reasons live there; when Messages is
+        // empty, the Title carries the reason. Don't try to match filenames against
+        // the prefix list (V6 would never pass).
         private static bool IsBlockedByPersistentFailure(TrackedDownload trackedDownload)
         {
             var groups = trackedDownload.StatusMessages;
@@ -371,36 +376,34 @@ namespace NzbDrone.Core.Download
                 return false;
             }
 
-            // Header strings we treat as "no information": these are wrappers around
-            // per-file detail rather than reasons themselves.
-            var downloadTitle = trackedDownload.DownloadItem?.Title;
             const string parentHeader = "One or more tracks expected in this release were not imported";
 
             var hasBlocker = false;
             foreach (var group in groups)
             {
-                // Walk Title + each Messages entry; either may carry the reason.
-                var entries = new List<string>();
-                if (!string.IsNullOrWhiteSpace(group.Title))
+                // Pick the entries that carry actual reasons. If Messages is non-empty
+                // the reasons live there (Title is a per-file label like a filename).
+                // If Messages is empty, the reason is in Title (V5 single-rejection
+                // path, or our header-only "One or more tracks expected..." entry).
+                List<string> reasons;
+                if (group.Messages != null && group.Messages.Count > 0)
                 {
-                    entries.Add(group.Title);
+                    reasons = group.Messages;
+                }
+                else if (!string.IsNullOrWhiteSpace(group.Title))
+                {
+                    reasons = new List<string> { group.Title };
+                }
+                else
+                {
+                    continue;
                 }
 
-                if (group.Messages != null)
-                {
-                    entries.AddRange(group.Messages);
-                }
-
-                foreach (var entry in entries)
+                foreach (var entry in reasons)
                 {
                     if (string.IsNullOrWhiteSpace(entry))
                     {
                         continue;
-                    }
-
-                    if (downloadTitle != null && entry == downloadTitle)
-                    {
-                        continue; // header repeating the download name
                     }
 
                     if (entry.StartsWith(parentHeader, StringComparison.OrdinalIgnoreCase))
