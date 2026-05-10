@@ -200,7 +200,21 @@ namespace NzbDrone.Core.Parser
                 }
             }
 
-            artist = _artistService.FindByName(parsedAlbumInfo.ArtistName);
+            try
+            {
+                artist = _artistService.FindByName(parsedAlbumInfo.ArtistName);
+            }
+            catch (MultipleArtistsFoundException)
+            {
+                // Two or more local artists share the same CleanName (e.g. two MB
+                // entries both named "Djo"). Disambiguate by checking which candidate
+                // owns an album whose title matches the parsed release's album. If
+                // exactly one matches, that's our artist; otherwise we can't tell
+                // from the indexer string alone — log and skip the release rather
+                // than dropping it on a thrown exception that pollutes the log every
+                // RSS sync. The user can manually disambiguate via search later.
+                artist = ResolveAmbiguousArtist(parsedAlbumInfo);
+            }
 
             if (artist == null)
             {
@@ -215,6 +229,51 @@ namespace NzbDrone.Core.Parser
             }
 
             return artist;
+        }
+
+        // Pick the right artist when the local DB has multiple entries sharing a
+        // CleanName. Strategy:
+        //   1. If parsedAlbumInfo names an album, find which candidate owns it
+        //      (exact title match, then inexact). One winner → return it.
+        //   2. If still ambiguous, return null — the release isn't actionable.
+        // Returning null lets the rest of the parse fall through to "No matching
+        // artist", which is the same outcome the throw produced but without the
+        // per-release error log.
+        private Artist ResolveAmbiguousArtist(ParsedAlbumInfo parsedAlbumInfo)
+        {
+            var candidates = _artistService.FindAllByName(parsedAlbumInfo.ArtistName);
+            if (candidates.Count <= 1)
+            {
+                return candidates.FirstOrDefault();
+            }
+
+            var displayName = candidates.First().Name;
+
+            if (parsedAlbumInfo.AlbumTitle.IsNullOrWhiteSpace())
+            {
+                _logger.Debug("Multiple '{0}' artists in library and no album title to disambiguate; skipping", displayName);
+                return null;
+            }
+
+            var matches = new List<Artist>();
+            foreach (var candidate in candidates)
+            {
+                var album = _albumService.FindByTitle(candidate.ArtistMetadataId, parsedAlbumInfo.AlbumTitle)
+                            ?? _albumService.FindByTitleInexact(candidate.ArtistMetadataId, parsedAlbumInfo.AlbumTitle);
+                if (album != null)
+                {
+                    matches.Add(candidate);
+                }
+            }
+
+            if (matches.Count == 1)
+            {
+                _logger.Debug("Disambiguated '{0}' (album '{1}') → MB id {2}", displayName, parsedAlbumInfo.AlbumTitle, matches[0].Metadata?.Value?.ForeignArtistId);
+                return matches[0];
+            }
+
+            _logger.Debug("Multiple '{0}' artists in library, album '{1}' matched {2} candidates; skipping", displayName, parsedAlbumInfo.AlbumTitle, matches.Count);
+            return null;
         }
 
         public Album GetLocalAlbum(string filename, Artist artist)
