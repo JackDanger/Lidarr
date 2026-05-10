@@ -12,7 +12,9 @@ using NzbDrone.Core.DecisionEngine;
 using NzbDrone.Core.Download;
 using NzbDrone.Core.MediaFiles.TrackImport.Aggregation;
 using NzbDrone.Core.MediaFiles.TrackImport.Identification;
+using NzbDrone.Core.Messaging.Events;
 using NzbDrone.Core.Music;
+using NzbDrone.Core.Music.Events;
 using NzbDrone.Core.Parser.Model;
 using NzbDrone.Core.Profiles.Qualities;
 using NzbDrone.Core.RootFolders;
@@ -46,7 +48,12 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
         public bool AddNewArtists { get; set; }
     }
 
-    public class ImportDecisionMaker : IMakeImportDecision
+    public class ImportDecisionMaker : IMakeImportDecision,
+        IHandle<ArtistEditedEvent>,
+        IHandle<ArtistMovedEvent>,
+        IHandle<ArtistsDeletedEvent>,
+        IHandle<AlbumEditedEvent>,
+        IHandle<AlbumDeletedEvent>
     {
         private readonly IEnumerable<IImportDecisionEngineSpecification<LocalTrack>> _trackSpecifications;
         private readonly IEnumerable<IImportDecisionEngineSpecification<LocalAlbumRelease>> _albumSpecifications;
@@ -271,6 +278,31 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
             using var sha = SHA1.Create();
             var hash = sha.ComputeHash(Encoding.UTF8.GetBytes(sb.ToString()));
             return Convert.ToHexString(hash);
+        }
+
+        // Cache invalidation: cached ImportDecision<LocalTrack> values hold direct
+        // Artist/Album/AlbumRelease references that were materialised at decision time.
+        // When the underlying records change (path, monitoring, profile, even deletion)
+        // the cached decisions become stale — re-using them then can throw (e.g. the
+        // Rod Stewart NotParentException after a root-folder change). Drop the whole
+        // cache on any of these events; identification will re-run on the next call
+        // (~25s cold per album folder), which is cheap relative to user-edit frequency.
+        public void Handle(ArtistEditedEvent message) => InvalidateDecisionCache("artist edited");
+        public void Handle(ArtistMovedEvent message) => InvalidateDecisionCache("artist moved");
+        public void Handle(ArtistsDeletedEvent message) => InvalidateDecisionCache("artists deleted");
+        public void Handle(AlbumEditedEvent message) => InvalidateDecisionCache("album edited");
+        public void Handle(AlbumDeletedEvent message) => InvalidateDecisionCache("album deleted");
+
+        private void InvalidateDecisionCache(string reason)
+        {
+            var count = _decisionCache.Count;
+            if (count == 0)
+            {
+                return;
+            }
+
+            _decisionCache.Clear();
+            _logger.Info("Cleared {0} cached import decisions ({1})", count, reason);
         }
 
         private void EnsureData(LocalAlbumRelease release)

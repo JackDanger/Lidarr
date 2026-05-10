@@ -59,11 +59,13 @@ added; **`✗`** marks a known violation/wart documented below.
               │   ├─ unable to parse        → ImportBlocked  ─┘
               │   └─ ok                     → ImportPending
               ▼
-       ┌───────────────┐  ▶ V11: our IsBlockedByUnfindableMetadata
-       │ ImportBlocked │     guard at CompletedDownloadService.Check L80
-       └──────┬────────┘     short-circuits when the existing messages
-              │              say the previous run already classified
-              │              this as unfindable. Without it, Check
+       ┌───────────────┐  ▶ V11: our IsBlockedByPersistentFailure guard
+       │ ImportBlocked │     at CompletedDownloadService.Check L80
+       └──────┬────────┘     short-circuits when the existing StatusMessages
+              │              (Title or Messages) match our "unfindable" or
+              │              "persistent import failure" prefix buckets
+              │              (V3 empty folder, V5 archive/exec/parse-fail,
+              │              V10 NotParentException, etc). Without it, Check
               │              would always reset → ImportPending.
               │
               ▼ Check passes → ImportPending
@@ -207,3 +209,47 @@ Three places reset state from outside the normal Import → result classificatio
   empty). The handler still reacts to `ApplicationStartedEvent` for the
   unrelated startup work (logging, RescanFolders, queueing the first
   RefreshMonitoredDownloads), but the reset itself is in the right place.
+
+- **~~V8~~ (fixed):** The V11 guard (`IsBlockedByUnfindableMetadata`) only
+  matched its prefixes against entries in `Messages`, not `Title`. The V3 path
+  uses `Warn(format, args)` which puts the reason in `Messages` (with
+  `Title=DownloadItem.Title`), but the V5 path uses
+  `Warn(new TrackedDownloadStatusMessage(error, []))` which puts the reason in
+  `Title` with empty `Messages`. The guard early-returned `false` whenever
+  `Messages` was empty, so V5-classified items (`Found archive file`,
+  `Caution: Found executable`, `Could not parse file for import`) bounced
+  ImportBlocked → ImportPending forever via Check. **Fix:** renamed to
+  `IsBlockedByPersistentFailure`, walks both Title and Messages, and adds a
+  `_persistentImportFailurePrefixes` bucket covering V3/V5 messages so we
+  recognise the full set of "won't change without user intervention" cases.
+
+- **~~V9~~ (fixed; same fix as V8):** V3's `"No files found are eligible for
+  import in {0}"` message wasn't in `_unfindableInMetadataPrefixes`, so empty
+  download folders also bounced forever. Fixed by V8's expanded prefix bucket.
+
+- **~~V10~~ (fixed):** Deterministic exceptions thrown inside `Import()`
+  (specifically `NotParentException` from `RemoveExistingTrackFiles` when an
+  artist's TrackFile path isn't under its current root folder) propagated up
+  to `DownloadProcessingService.Execute`'s catch block, which reset State
+  Importing → ImportPending and silently looped forever. Observed in
+  production: Rod Stewart 14CD BoxSet (131 FLAC files, fully identified)
+  threw the same exception every refresh because the artist record had been
+  moved between root folders without moving the existing files. **Fix:**
+  `Import()` now catches `NotParentException` explicitly, attaches the
+  exception message as a status message, and sets ImportBlocked. The user
+  sees the actual problem in the queue and can fix the artist's root folder
+  via the UI; the V11 guard then keeps the item from being re-attempted
+  every refresh.
+
+- **~~V11~~ (fixed; cache hygiene):** The new in-memory import-decision
+  cache (`ImportDecisionMaker._decisionCache`) holds direct references to
+  Artist/Album/AlbumRelease records inside the cached `LocalTrack`s. When a
+  user edits an artist (path, root folder, profile) the cached decisions
+  become stale and re-using them can throw — observed as the Rod Stewart
+  NotParentException continuing to fire even after the artist record was
+  fixed, until Lidarr was restarted. **Fix:** `ImportDecisionMaker` now
+  implements `IHandle<ArtistEditedEvent>`, `IHandle<ArtistMovedEvent>`,
+  `IHandle<ArtistsDeletedEvent>`, `IHandle<AlbumEditedEvent>`, and
+  `IHandle<AlbumDeletedEvent>`, all of which call `_decisionCache.Clear()`.
+  Cost is one round of identification on the next Import call (~25s cold per
+  album folder), which is rare relative to user-edit frequency.

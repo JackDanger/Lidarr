@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using NLog;
+using NzbDrone.Common.Disk;
 using NzbDrone.Common.EnvironmentInfo;
 using NzbDrone.Common.Extensions;
 using NzbDrone.Common.Instrumentation.Extensions;
@@ -78,7 +79,7 @@ namespace NzbDrone.Core.Download
             // again, and we burn CPU forever (~31 cycles per item over 2.5h was observed).
             // Recognize that case by its StatusMessages and exit before the reset.
             if (trackedDownload.State == TrackedDownloadState.ImportBlocked
-                && IsBlockedByUnfindableMetadata(trackedDownload))
+                && IsBlockedByPersistentFailure(trackedDownload))
             {
                 return;
             }
@@ -154,7 +155,26 @@ namespace NzbDrone.Core.Download
             trackedDownload.State = TrackedDownloadState.Importing;
 
             var outputPath = trackedDownload.ImportItem.OutputPath.FullPath;
-            var importResults = _downloadedTracksImportService.ProcessPath(outputPath, ImportMode.Auto, trackedDownload.RemoteAlbum.Artist, trackedDownload.ImportItem);
+            List<ImportResult> importResults;
+
+            try
+            {
+                importResults = _downloadedTracksImportService.ProcessPath(outputPath, ImportMode.Auto, trackedDownload.RemoteAlbum.Artist, trackedDownload.ImportItem);
+            }
+            catch (NotParentException ex)
+            {
+                // Deterministic data-shape error (e.g. existing TrackFile path is not under
+                // the artist's current root folder — usually because the artist's path was
+                // changed without moving the files, or because the same artist has files
+                // under two different roots). Re-running won't fix this without user
+                // intervention. Park as ImportBlocked with the exception message so the
+                // user sees what's wrong instead of an endless DownloadProcessingService
+                // catch loop. See V12 in docs/tracked-download-state-machine.md.
+                _logger.Warn(ex, "Deterministic config error importing {0}; marking ImportBlocked", trackedDownload.DownloadItem.Title);
+                trackedDownload.Warn(new TrackedDownloadStatusMessage(ex.Message, new List<string>()));
+                SetStateToImportBlocked(trackedDownload);
+                return;
+            }
 
             if (VerifyImport(trackedDownload, importResults))
             {
@@ -291,6 +311,25 @@ namespace NzbDrone.Core.Download
             "No tracks could be matched to a release"
         };
 
+        // Reasons set by ClassifyAndSetState (V3 / V5) and CheckEmptyResultForIssue
+        // that mean re-running Import on the same folder won't change the outcome.
+        // Recognised in addition to _unfindableInMetadataPrefixes by Check's
+        // persistent-failure guard. Re-evaluated on Lidarr restart (cache clears) or
+        // when the folder content actually changes (the user extracts the archive,
+        // copies in audio files, etc) — but until then we don't burn cycles re-running
+        // Import every refresh.
+        private static readonly string[] _persistentImportFailurePrefixes =
+        {
+            "No files found are eligible for import",       // V3: empty folder / Blu-ray / SACD
+            "Found archive file",                           // V5: .rar / .tar / .zip etc
+            "Caution: Found executable",                    // V5: .exe / .sh etc
+            "Could not parse file for import",              // V5 fallback
+            "Invalid audio file, unsupported extension",    // single-file unknown ext
+            "Unable to parse download, automatic import is not possible",
+            "Artist name mismatch",                          // user-fixable but folder content didn't change
+            "Download wasn't grabbed by Lidarr"
+        };
+
         private static bool MatchesAnyPrefix(string error, string[] prefixes)
         {
             if (string.IsNullOrWhiteSpace(error))
@@ -310,13 +349,21 @@ namespace NzbDrone.Core.Download
         }
 
         // Look at the StatusMessages currently attached to the tracked download (these
-        // are what the importer most recently put on it). True iff there's at least one
-        // file-level message and every file-level message is one of our two non-actionable
-        // bucket reasons, AND at least one is "couldn't find" (otherwise it would have
-        // been set Imported, not ImportBlocked, by TryHandleNonActionable). Used to keep
-        // Check from re-entering the import pipeline for items we've already determined
-        // can't be auto-resolved.
-        private static bool IsBlockedByUnfindableMetadata(TrackedDownload trackedDownload)
+        // are what the importer most recently put on it). Return true iff every Title
+        // and Messages entry matches one of:
+        //   - _alreadyHaveContentPrefixes ("we have it" — would be Imported, not Blocked)
+        //   - _unfindableInMetadataPrefixes ("MB doesn't have this album yet")
+        //   - _persistentImportFailurePrefixes ("nothing on disk for us to import")
+        // AND at least one is a real blocker (not just "already have it"). Used to keep
+        // Check from re-entering the import pipeline for items we've already classified
+        // as can't-auto-resolve. Without this, the V5/V3 cases bounce ImportBlocked →
+        // ImportPending forever (~50 cycles per Execute pass were observed).
+        //
+        // Why both Title and Messages: V3 (Warn(format,args)) puts the reason in
+        // Messages with Title=DownloadItem.Title, but V5 (Warn(TrackedDownloadStatusMessage(error,[])))
+        // puts the reason in Title with empty Messages. Different code paths, same
+        // user-facing intent — both need to be recognised.
+        private static bool IsBlockedByPersistentFailure(TrackedDownload trackedDownload)
         {
             var groups = trackedDownload.StatusMessages;
             if (groups == null || groups.Length == 0)
@@ -324,35 +371,61 @@ namespace NzbDrone.Core.Download
                 return false;
             }
 
-            // Skip the leading "One or more tracks expected ..." header message which
-            // has no per-file content; only file-level entries (.Messages.Count > 0)
-            // carry our rejection reasons.
-            var fileLevel = groups.SelectMany(g => g.Messages ?? new List<string>()).ToList();
-            if (fileLevel.Count == 0)
-            {
-                return false;
-            }
+            // Header strings we treat as "no information": these are wrappers around
+            // per-file detail rather than reasons themselves.
+            var downloadTitle = trackedDownload.DownloadItem?.Title;
+            const string parentHeader = "One or more tracks expected in this release were not imported";
 
-            var hasUnfindable = false;
-            foreach (var msg in fileLevel)
+            var hasBlocker = false;
+            foreach (var group in groups)
             {
-                if (MatchesAnyPrefix(msg, _alreadyHaveContentPrefixes))
+                // Walk Title + each Messages entry; either may carry the reason.
+                var entries = new List<string>();
+                if (!string.IsNullOrWhiteSpace(group.Title))
                 {
-                    continue;
+                    entries.Add(group.Title);
                 }
 
-                if (MatchesAnyPrefix(msg, _unfindableInMetadataPrefixes))
+                if (group.Messages != null)
                 {
-                    hasUnfindable = true;
-                    continue;
+                    entries.AddRange(group.Messages);
                 }
 
-                // Some other message we don't classify — fall through to retry, since
-                // the situation may have changed.
-                return false;
+                foreach (var entry in entries)
+                {
+                    if (string.IsNullOrWhiteSpace(entry))
+                    {
+                        continue;
+                    }
+
+                    if (downloadTitle != null && entry == downloadTitle)
+                    {
+                        continue; // header repeating the download name
+                    }
+
+                    if (entry.StartsWith(parentHeader, StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    if (MatchesAnyPrefix(entry, _alreadyHaveContentPrefixes))
+                    {
+                        continue;
+                    }
+
+                    if (MatchesAnyPrefix(entry, _unfindableInMetadataPrefixes) ||
+                        MatchesAnyPrefix(entry, _persistentImportFailurePrefixes))
+                    {
+                        hasBlocker = true;
+                        continue;
+                    }
+
+                    // Unrecognised reason — allow retry, the situation may have changed.
+                    return false;
+                }
             }
 
-            return hasUnfindable;
+            return hasBlocker;
         }
 
         private bool TryHandleNonActionable(TrackedDownload trackedDownload, List<ImportResult> importResults)
