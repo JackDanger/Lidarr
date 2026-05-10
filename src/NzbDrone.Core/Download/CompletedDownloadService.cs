@@ -117,6 +117,23 @@ namespace NzbDrone.Core.Download
             trackedDownload.State = TrackedDownloadState.ImportPending;
         }
 
+        // Invariants this method now enforces — keep them when editing:
+        //
+        //   1. Every code path through Import sets the TrackedDownload's State to
+        //      exactly one terminal-or-pending value before returning. No path
+        //      "leaks" with State == Importing left behind (the only legitimate
+        //      Importing-on-exit case is an exception escaping ProcessPath, which
+        //      DownloadProcessingService.Execute's catch block normalizes back to
+        //      ImportPending).
+        //
+        //   2. The state assignment is the LAST thing that varies per path. There
+        //      is no "default ImportPending then maybe override" pattern — that
+        //      was the bug behind V3/V5 in docs/tracked-download-state-machine.md.
+        //
+        //   3. Per-file rejection messages are only attached when there are real
+        //      per-file rejections. The "One or more tracks ..." header is added
+        //      only as a parent grouping for actual file-level entries, never as
+        //      a free-standing message (V4).
         public void Import(TrackedDownload trackedDownload)
         {
             SetImportItem(trackedDownload);
@@ -144,71 +161,105 @@ namespace NzbDrone.Core.Download
                 return;
             }
 
-            trackedDownload.State = TrackedDownloadState.ImportPending;
+            ClassifyAndSetState(trackedDownload, importResults, outputPath);
+        }
 
+        // Single decision point for the post-ProcessPath terminal state. Each branch
+        // sets exactly one State value and (if appropriate) attaches messages and
+        // publishes events. Order matters: we handle structural failures (no audio
+        // / unparseable file) before content failures (rejection chain), and we
+        // give TryHandleNonActionable a chance to short-circuit the rejection chain
+        // into Imported/ImportBlocked before falling through to ImportFailed.
+        private void ClassifyAndSetState(TrackedDownload trackedDownload, List<ImportResult> importResults, string outputPath)
+        {
+            // (V3) The download contained no files Lidarr could even attempt to import
+            // (Blu-ray ISO, SACD video, archive that wasn't extracted, empty folder).
+            // Retrying won't help — the file set on disk doesn't change shape between
+            // refreshes. Surface it to the user via ImportBlocked.
             if (importResults.Empty())
             {
                 trackedDownload.Warn("No files found are eligible for import in {0}", outputPath);
-
+                SetStateToImportBlocked(trackedDownload);
                 return;
             }
 
+            // (V5) The download has a single file that couldn't be parsed into a
+            // LocalTrack at all (unsupported extension, corrupt tags, etc.). Same
+            // treatment as V3 — the file's shape on disk won't change.
             if (importResults.Count == 1)
             {
-                var firstResult = importResults.First();
-
-                if (firstResult.Result == ImportResultType.Rejected && firstResult.ImportDecision.Item == null)
+                var only = importResults[0];
+                if (only.Result == ImportResultType.Rejected && only.ImportDecision.Item == null)
                 {
-                    trackedDownload.Warn(new TrackedDownloadStatusMessage(firstResult.Errors.First(), new List<string>()));
-
+                    var error = only.Errors.FirstOrDefault() ?? "Could not parse file for import";
+                    trackedDownload.Warn(new TrackedDownloadStatusMessage(error, new List<string>()));
+                    SetStateToImportBlocked(trackedDownload);
                     return;
                 }
             }
 
-            var statusMessages = new List<TrackedDownloadStatusMessage>
-                                 {
-                                    new TrackedDownloadStatusMessage("One or more tracks expected in this release were not imported or missing from the release", new List<string>())
-                                 };
+            // From here on we know there's at least one result with a parsed Item.
+            var nonImported = importResults.Where(r => r.Result != ImportResultType.Imported).ToList();
 
-            if (importResults.Any(c => c.Result != ImportResultType.Imported))
+            // No non-imported results at all means every file imported successfully
+            // even though VerifyImport returned false (the album's expected track
+            // count is higher than what we just imported — usually because the
+            // monitored release lists tracks we haven't downloaded). Treat the
+            // download as Imported; the missing-tracks problem is independent of
+            // whether this download succeeded.
+            if (nonImported.Count == 0)
             {
-                statusMessages.AddRange(
-                    importResults
-                        .Where(v => v.Result != ImportResultType.Imported && v.ImportDecision.Item != null)
-                        .OrderBy(v => v.ImportDecision.Item.Path)
-                        .Select(v =>
-                            new TrackedDownloadStatusMessage(Path.GetFileName(v.ImportDecision.Item.Path),
-                                v.Errors)));
+                _logger.Debug("All importResults imported but VerifyImport=false (release track count exceeds what was in this download). Marking {0} as Imported.", trackedDownload.DownloadItem.Title);
+                trackedDownload.State = TrackedDownloadState.Imported;
 
-                // Short-circuit terminal states: we evaluate whether every non-imported
-                // result is "non-actionable" (either benign — we already have it — or
-                // structurally unfixable — MB has no entry). If so we move the download
-                // out of the retry loop. Otherwise it stays ImportFailed so it gets
-                // another pass when matching code or metadata changes.
-                if (TryHandleNonActionable(trackedDownload, importResults, statusMessages))
+                if (trackedDownload.RemoteAlbum?.Artist != null)
                 {
-                    return;
+                    _eventAggregator.PublishEvent(new DownloadCompletedEvent(trackedDownload, trackedDownload.RemoteAlbum.Artist.Id));
                 }
-
-                // Mark as failed to prevent further attempts at processing
-                trackedDownload.State = TrackedDownloadState.ImportFailed;
-
-                if (statusMessages.Any())
-                {
-                    trackedDownload.Warn(statusMessages.ToArray());
-                }
-
-                // Publish event to notify album was imported incomplete
-                _eventAggregator.PublishEvent(new AlbumImportIncompleteEvent(trackedDownload));
 
                 return;
             }
 
-            if (statusMessages.Any())
+            // Mixed or all-rejected. Give the non-actionable short-circuit a turn
+            // first; it may move us to Imported (we already have everything) or to
+            // ImportBlocked (Lidarr can't match anything in MB). Either is terminal.
+            if (TryHandleNonActionable(trackedDownload, importResults))
             {
-                trackedDownload.Warn(statusMessages.ToArray());
-                SetStateToImportBlocked(trackedDownload);
+                return;
             }
+
+            // Fall-through: there's at least one rejection that future code or
+            // metadata changes could plausibly fix. Park in ImportFailed for the
+            // ResetFailedImportsForRetry loop to pick up next refresh.
+            var statusMessages = BuildPerFileStatusMessages(nonImported);
+            trackedDownload.State = TrackedDownloadState.ImportFailed;
+            trackedDownload.Warn(statusMessages.ToArray());
+            _eventAggregator.PublishEvent(new AlbumImportIncompleteEvent(trackedDownload));
+        }
+
+        private static List<TrackedDownloadStatusMessage> BuildPerFileStatusMessages(List<ImportResult> nonImported)
+        {
+            // Header parent + per-file children. The header is only attached when
+            // there's at least one per-file message to group; that's why we don't
+            // pre-seed it at construction time.
+            var perFile = nonImported
+                .Where(v => v.ImportDecision.Item != null)
+                .OrderBy(v => v.ImportDecision.Item.Path)
+                .Select(v => new TrackedDownloadStatusMessage(
+                    Path.GetFileName(v.ImportDecision.Item.Path),
+                    v.Errors))
+                .ToList();
+
+            var messages = new List<TrackedDownloadStatusMessage>();
+            if (perFile.Count > 0)
+            {
+                messages.Add(new TrackedDownloadStatusMessage(
+                    "One or more tracks expected in this release were not imported or missing from the release",
+                    new List<string>()));
+                messages.AddRange(perFile);
+            }
+
+            return messages;
         }
 
         // Rejection reasons split into two non-actionable buckets:
@@ -304,7 +355,7 @@ namespace NzbDrone.Core.Download
             return hasUnfindable;
         }
 
-        private bool TryHandleNonActionable(TrackedDownload trackedDownload, List<ImportResult> importResults, List<TrackedDownloadStatusMessage> statusMessages)
+        private bool TryHandleNonActionable(TrackedDownload trackedDownload, List<ImportResult> importResults)
         {
             // Walk every non-imported result. If any of them includes a rejection we
             // could plausibly fix later (i.e. doesn't match either non-actionable
@@ -350,9 +401,12 @@ namespace NzbDrone.Core.Download
             {
                 _logger.Info("Download '{0}' has files Lidarr couldn't match in MusicBrainz; marking as ImportBlocked (manual import or MB metadata needed).", trackedDownload.DownloadItem.Title);
 
-                if (statusMessages.Any())
+                // Surface the per-file detail so the user can see exactly which
+                // subfolders / files Lidarr couldn't match, then go terminal.
+                var perFile = BuildPerFileStatusMessages(nonImported);
+                if (perFile.Count > 0)
                 {
-                    trackedDownload.Warn(statusMessages.ToArray());
+                    trackedDownload.Warn(perFile.ToArray());
                 }
 
                 SetStateToImportBlocked(trackedDownload);
