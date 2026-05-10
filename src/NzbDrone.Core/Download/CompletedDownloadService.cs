@@ -36,6 +36,7 @@ namespace NzbDrone.Core.Download
         private readonly IParsingService _parsingService;
         private readonly ITrackedDownloadAlreadyImported _trackedDownloadAlreadyImported;
         private readonly IExtractionService _extractionService;
+        private readonly IDiskProvider _diskProvider;
         private readonly Logger _logger;
 
         public CompletedDownloadService(IEventAggregator eventAggregator,
@@ -46,6 +47,7 @@ namespace NzbDrone.Core.Download
                                         IParsingService parsingService,
                                         ITrackedDownloadAlreadyImported trackedDownloadAlreadyImported,
                                         IExtractionService extractionService,
+                                        IDiskProvider diskProvider,
                                         Logger logger)
         {
             _eventAggregator = eventAggregator;
@@ -56,6 +58,7 @@ namespace NzbDrone.Core.Download
             _parsingService = parsingService;
             _trackedDownloadAlreadyImported = trackedDownloadAlreadyImported;
             _extractionService = extractionService;
+            _diskProvider = diskProvider;
             _logger = logger;
         }
 
@@ -252,9 +255,11 @@ namespace NzbDrone.Core.Download
             }
 
             // Mixed or all-rejected. Give the non-actionable short-circuit a turn
-            // first; it may move us to Imported (we already have everything) or to
-            // ImportBlocked (Lidarr can't match anything in MB). Either is terminal.
-            if (TryHandleNonActionable(trackedDownload, importResults))
+            // first; it may move us to Imported (we already have everything), to
+            // Imported via orphan-import (we couldn't match in MB but filed the audio
+            // into the artist's .unmatched/ folder anyway), or to ImportBlocked
+            // (some non-MB content + we can't recover). Each is terminal.
+            if (TryHandleNonActionable(trackedDownload, importResults, outputPath))
             {
                 return;
             }
@@ -442,7 +447,7 @@ namespace NzbDrone.Core.Download
             return hasBlocker;
         }
 
-        private bool TryHandleNonActionable(TrackedDownload trackedDownload, List<ImportResult> importResults)
+        private bool TryHandleNonActionable(TrackedDownload trackedDownload, List<ImportResult> importResults, string outputPath)
         {
             // Walk every non-imported result. If any of them includes a rejection we
             // could plausibly fix later (i.e. doesn't match either non-actionable
@@ -486,6 +491,15 @@ namespace NzbDrone.Core.Download
 
             if (hasUnfindable)
             {
+                // Before resigning to ImportBlocked, try to file the audio into the
+                // artist's .unmatched/ folder so the bits aren't lost. Matches the
+                // user's stated import philosophy: "if a download adds tracks the
+                // library doesn't have, import it." See TryOrphanImport.
+                if (TryOrphanImport(trackedDownload, nonImported, outputPath))
+                {
+                    return true;
+                }
+
                 _logger.Info("Download '{0}' has files Lidarr couldn't match in MusicBrainz; marking as ImportBlocked (manual import or MB metadata needed).", trackedDownload.DownloadItem.Title);
 
                 // Surface the per-file detail so the user can see exactly which
@@ -509,6 +523,128 @@ namespace NzbDrone.Core.Download
             }
 
             return true;
+        }
+
+        // Move audio files Lidarr couldn't match in MB into the artist's library
+        // folder under `.unmatched/<original-download-folder>/`. The dot-prefix
+        // means DiskScanService skips this directory on future scans, so we don't
+        // re-attempt identification on it forever; the bits live next to the
+        // artist's matched albums for organisational clarity.
+        //
+        // Prototype constraints (will probably revisit before upstreaming):
+        //   - We need a parsed Artist with a real Path; without one, we don't
+        //     know where the files belong and bail out (caller falls through to
+        //     ImportBlocked).
+        //   - Files are MOVED, not copied. SAB cleans up the empty download
+        //     folder on the next refresh as it does for normal imports.
+        //   - No DB rows are created for the moved files. The Lidarr UI won't
+        //     show them under the artist; that requires schema work for
+        //     "TrackFile without Track" which is out of scope here.
+        //   - A `_lidarr-unmatched.txt` marker is dropped in the destination
+        //     folder with download title, timestamp, and the rejection reasons
+        //     so the user can see what happened later.
+        private bool TryOrphanImport(TrackedDownload trackedDownload, List<ImportResult> nonImported, string outputPath)
+        {
+            var artist = trackedDownload.RemoteAlbum?.Artist;
+            if (artist == null || string.IsNullOrWhiteSpace(artist.Path))
+            {
+                return false;
+            }
+
+            if (!_diskProvider.FolderExists(outputPath))
+            {
+                return false;
+            }
+
+            var allFiles = _diskProvider.GetFiles(outputPath, true).ToList();
+            var audioFiles = allFiles
+                .Where(f => MediaFileExtensions.Extensions.Contains(Path.GetExtension(f)))
+                .ToList();
+
+            if (audioFiles.Count == 0)
+            {
+                return false;
+            }
+
+            var downloadFolderName = Path.GetFileName(outputPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+            if (string.IsNullOrWhiteSpace(downloadFolderName))
+            {
+                downloadFolderName = "unknown-" + DateTime.UtcNow.ToString("yyyyMMdd-HHmmss");
+            }
+
+            var destinationRoot = Path.Combine(artist.Path, ".unmatched", downloadFolderName);
+
+            try
+            {
+                _diskProvider.CreateFolder(destinationRoot);
+
+                foreach (var file in audioFiles)
+                {
+                    // Preserve the file's relative location so multi-disc / discography
+                    // structure inside the download is intact at the destination.
+                    var relative = file.Substring(outputPath.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                    var destination = Path.Combine(destinationRoot, relative);
+                    var destDir = Path.GetDirectoryName(destination);
+                    if (!string.IsNullOrEmpty(destDir))
+                    {
+                        _diskProvider.CreateFolder(destDir);
+                    }
+
+                    _diskProvider.MoveFile(file, destination, overwrite: true);
+                }
+
+                WriteOrphanMarker(destinationRoot, trackedDownload, nonImported);
+
+                _logger.Info(
+                    "Orphan-imported {0} audio files from '{1}' into {2} (couldn't match in MB; filed under .unmatched/)",
+                    audioFiles.Count,
+                    trackedDownload.DownloadItem.Title,
+                    destinationRoot);
+
+                trackedDownload.State = TrackedDownloadState.Imported;
+                _eventAggregator.PublishEvent(new DownloadCompletedEvent(trackedDownload, artist.Id));
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logger.Warn(ex, "Orphan import failed for '{0}'; falling back to ImportBlocked", trackedDownload.DownloadItem.Title);
+                return false;
+            }
+        }
+
+        private void WriteOrphanMarker(string destinationRoot, TrackedDownload trackedDownload, List<ImportResult> nonImported)
+        {
+            try
+            {
+                var lines = new List<string>
+                {
+                    $"Source download : {trackedDownload.DownloadItem.Title}",
+                    $"Download id     : {trackedDownload.DownloadItem.DownloadId}",
+                    $"Imported at     : {DateTime.UtcNow:o}",
+                    $"Reason          : Lidarr couldn't match these files against any MusicBrainz release for the parsed artist.",
+                    string.Empty,
+                    "Per-file rejection messages:"
+                };
+
+                foreach (var r in nonImported.Take(50))
+                {
+                    var path = r.ImportDecision?.Item?.Path ?? "(unknown)";
+                    var err = r.Errors == null || r.Errors.Count == 0 ? "(none)" : string.Join("; ", r.Errors);
+                    lines.Add($"  {Path.GetFileName(path)}: {err}");
+                }
+
+                lines.Add(string.Empty);
+                lines.Add("These files have NOT been linked to a Lidarr Album record. Use the manual");
+                lines.Add("import UI on the parent folder to disambiguate, or move them into the");
+                lines.Add("appropriate album folder by hand. The .unmatched/ prefix keeps them out of");
+                lines.Add("Lidarr's regular disk scans.");
+
+                File.WriteAllText(Path.Combine(destinationRoot, "_lidarr-unmatched.txt"), string.Join("\n", lines));
+            }
+            catch (Exception ex)
+            {
+                _logger.Debug(ex, "Couldn't write orphan-import marker in {0}", destinationRoot);
+            }
         }
 
         public bool VerifyImport(TrackedDownload trackedDownload, List<ImportResult> importResults)
