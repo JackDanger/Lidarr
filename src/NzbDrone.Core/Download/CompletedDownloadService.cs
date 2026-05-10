@@ -69,6 +69,20 @@ namespace NzbDrone.Core.Download
                 return;
             }
 
+            // ImportBlocked covers two distinct cases. The "user must intervene" cases
+            // (Artist mismatch / Unable to parse / etc.) deserve a re-check whenever the
+            // monitor refreshes — the user may have fixed the underlying problem. But
+            // the "no MusicBrainz match anywhere" case (set by TryHandleNonActionable)
+            // is structurally unfixable from inside Lidarr; re-running Check on it just
+            // bounces the state back to ImportPending, the importer marks it ImportBlocked
+            // again, and we burn CPU forever (~31 cycles per item over 2.5h was observed).
+            // Recognize that case by its StatusMessages and exit before the reset.
+            if (trackedDownload.State == TrackedDownloadState.ImportBlocked
+                && IsBlockedByUnfindableMetadata(trackedDownload))
+            {
+                return;
+            }
+
             var historyItem = _historyService.MostRecentForDownloadId(trackedDownload.DownloadItem.DownloadId);
 
             if (historyItem == null && trackedDownload.DownloadItem.Category.IsNullOrWhiteSpace())
@@ -242,6 +256,52 @@ namespace NzbDrone.Core.Download
             }
 
             return false;
+        }
+
+        // Look at the StatusMessages currently attached to the tracked download (these
+        // are what the importer most recently put on it). True iff there's at least one
+        // file-level message and every file-level message is one of our two non-actionable
+        // bucket reasons, AND at least one is "couldn't find" (otherwise it would have
+        // been set Imported, not ImportBlocked, by TryHandleNonActionable). Used to keep
+        // Check from re-entering the import pipeline for items we've already determined
+        // can't be auto-resolved.
+        private static bool IsBlockedByUnfindableMetadata(TrackedDownload trackedDownload)
+        {
+            var groups = trackedDownload.StatusMessages;
+            if (groups == null || groups.Length == 0)
+            {
+                return false;
+            }
+
+            // Skip the leading "One or more tracks expected ..." header message which
+            // has no per-file content; only file-level entries (.Messages.Count > 0)
+            // carry our rejection reasons.
+            var fileLevel = groups.SelectMany(g => g.Messages ?? new List<string>()).ToList();
+            if (fileLevel.Count == 0)
+            {
+                return false;
+            }
+
+            var hasUnfindable = false;
+            foreach (var msg in fileLevel)
+            {
+                if (MatchesAnyPrefix(msg, _alreadyHaveContentPrefixes))
+                {
+                    continue;
+                }
+
+                if (MatchesAnyPrefix(msg, _unfindableInMetadataPrefixes))
+                {
+                    hasUnfindable = true;
+                    continue;
+                }
+
+                // Some other message we don't classify — fall through to retry, since
+                // the situation may have changed.
+                return false;
+            }
+
+            return hasUnfindable;
         }
 
         private bool TryHandleNonActionable(TrackedDownload trackedDownload, List<ImportResult> importResults, List<TrackedDownloadStatusMessage> statusMessages)
