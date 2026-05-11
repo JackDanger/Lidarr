@@ -1,8 +1,9 @@
 using System;
+using System.Diagnostics;
 using System.IO;
+using System.Text;
 using NLog;
 using NzbDrone.Common.EnvironmentInfo;
-using NzbDrone.Common.Processes;
 
 namespace NzbDrone.Core.MediaFiles.Extraction
 {
@@ -16,15 +17,21 @@ namespace NzbDrone.Core.MediaFiles.Extraction
     // isomage handles them; raw block-device dumps don't, and isomage will exit
     // non-zero in that case. We let it try and fall through to ImportBlocked on
     // failure rather than guessing the .img sub-flavour up front.
+    //
+    // We bypass IProcessProvider here on purpose: isomage streams its progress
+    // (1 line per ~0.8% complete) to stderr and has no --quiet flag, and
+    // ProcessProvider.Start unconditionally pipes every stderr line into
+    // logger.Error — which would flood lidarr.txt with thousands of Error-level
+    // lines per multi-GB extract. Spawning Process directly lets us hold stderr
+    // in a buffer and only emit it when the exit code says something actually
+    // went wrong.
     public class IsoExtractor : IArchiveExtractor
     {
-        private readonly IProcessProvider _processProvider;
         private readonly Logger _logger;
         private readonly bool _available;
 
-        public IsoExtractor(IProcessProvider processProvider, Logger logger)
+        public IsoExtractor(Logger logger)
         {
-            _processProvider = processProvider;
             _logger = logger;
             _available = ProbeAvailable();
         }
@@ -47,18 +54,48 @@ namespace NzbDrone.Core.MediaFiles.Extraction
             // mid-extract failure is the only path that re-enters here, and a
             // half-extracted folder is acceptable for a personal fork (operator
             // deletes partial files and clears the marker manually).
-            var args = $"-x / -o \"{destinationFolder}\" \"{archivePath}\"";
-            var output = _processProvider.StartAndCapture("isomage", args);
-            if (output.ExitCode == 0)
+            var startInfo = new ProcessStartInfo("isomage")
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            startInfo.ArgumentList.Add("-x");
+            startInfo.ArgumentList.Add("/");
+            startInfo.ArgumentList.Add("-o");
+            startInfo.ArgumentList.Add(destinationFolder);
+            startInfo.ArgumentList.Add(archivePath);
+
+            // Buffer stderr so we can emit it as a single Warn line only on
+            // failure. Reading both streams via events prevents the OS pipe
+            // buffer from filling and deadlocking the child on a big extract.
+            var stderrBuffer = new StringBuilder();
+            using var process = new Process { StartInfo = startInfo };
+            process.OutputDataReceived += (_, _) => { };
+            process.ErrorDataReceived += (_, e) =>
+            {
+                if (!string.IsNullOrEmpty(e.Data))
+                {
+                    stderrBuffer.AppendLine(e.Data);
+                }
+            };
+
+            process.Start();
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
+            process.WaitForExit();
+
+            if (process.ExitCode == 0)
             {
                 return true;
             }
 
             _logger.Warn(
                 "isomage exited {0} for {1}: {2}",
-                output.ExitCode,
+                process.ExitCode,
                 archivePath,
-                output.Lines);
+                stderrBuffer.ToString().TrimEnd());
             return false;
         }
 
