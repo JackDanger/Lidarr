@@ -40,6 +40,7 @@ namespace NzbDrone.Core.Download
         private readonly IDiskProvider _diskProvider;
         private readonly IDiskScanService _diskScanService;
         private readonly IConfigService _configService;
+        private readonly IFailedDownloadService _failedDownloadService;
         private readonly Logger _logger;
 
         public CompletedDownloadService(IEventAggregator eventAggregator,
@@ -53,6 +54,7 @@ namespace NzbDrone.Core.Download
                                         IDiskProvider diskProvider,
                                         IDiskScanService diskScanService,
                                         IConfigService configService,
+                                        IFailedDownloadService failedDownloadService,
                                         Logger logger)
         {
             _eventAggregator = eventAggregator;
@@ -66,6 +68,7 @@ namespace NzbDrone.Core.Download
             _diskProvider = diskProvider;
             _diskScanService = diskScanService;
             _configService = configService;
+            _failedDownloadService = failedDownloadService;
             _logger = logger;
         }
 
@@ -219,6 +222,22 @@ namespace NzbDrone.Core.Download
             // refreshes. Surface it to the user via ImportBlocked.
             if (importResults.Empty())
             {
+                // Stronger signal: we already unpacked an archive in this folder
+                // (a .lidarr-extracted marker is present) and there's still no audio
+                // to import. The archive was a dud — DVD-Video disc, an .exe-only
+                // payload, etc. Treat it the same as a failed download: blocklist
+                // the release, tell the download client to remove the files, and
+                // do NOT re-grab. This is the terminal state ImportBlocked refuses
+                // to be (ImportBlocked is "intervene and re-check"; this is "give up").
+                if (HasExtractedNoAudio(outputPath))
+                {
+                    _logger.Warn(
+                        "Download {0} was extracted but contains no audio — marking failed and removing",
+                        trackedDownload.DownloadItem.Title);
+                    _failedDownloadService.MarkAsFailed(trackedDownload, skipRedownload: true);
+                    return;
+                }
+
                 trackedDownload.Warn("No files found are eligible for import in {0}", outputPath);
                 SetStateToImportBlocked(trackedDownload);
                 return;
@@ -546,6 +565,30 @@ namespace NzbDrone.Core.Download
         //   - A `_lidarr-unmatched.txt` marker is dropped in the destination
         //     folder with download title, timestamp, and the rejection reasons
         //     so the user can see what happened later.
+        // True iff ExtractionService has previously unpacked at least one archive
+        // under outputPath and no audio remains for import. The marker (suffix
+        // ExtractionService.MarkerSuffix, written only after a successful extract)
+        // is the persistence layer for "we already tried" — survives restarts,
+        // so this stays correct across refresh cycles instead of only firing on
+        // the same Check() that did the extraction.
+        private bool HasExtractedNoAudio(string outputPath)
+        {
+            if (!_diskProvider.FolderExists(outputPath))
+            {
+                return false;
+            }
+
+            var hasMarker = _diskProvider.GetFiles(outputPath, true)
+                .Any(p => p.EndsWith(ExtractionService.MarkerSuffix));
+
+            if (!hasMarker)
+            {
+                return false;
+            }
+
+            return !_diskScanService.GetAudioFiles(outputPath).Any();
+        }
+
         private bool TryOrphanImport(TrackedDownload trackedDownload, List<ImportResult> nonImported, string outputPath)
         {
             // Master toggle: if the user has switched orphan-import off they want
