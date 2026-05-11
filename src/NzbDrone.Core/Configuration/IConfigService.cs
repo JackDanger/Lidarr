@@ -38,6 +38,15 @@ namespace NzbDrone.Core.Configuration
         string ScriptImportPath { get; set; }
         bool ImportExtraFiles { get; set; }
         string ExtraFileExtensions { get; set; }
+
+        // Orphan import (this fork): when an auto-import can't match audio
+        // against any MusicBrainz release for the parsed artist, optionally
+        // file the bits into the artist folder anyway so they aren't lost.
+        // See CompletedDownloadService.TryOrphanImport.
+        bool OrphanImportEnabled { get; set; }
+        string OrphanImportSubfolder { get; set; }
+        bool OrphanImportWriteMarker { get; set; }
+
         bool WatchLibraryForChanges { get; set; }
         RescanAfterRefreshType RescanAfterRefresh { get; set; }
         AllowFingerprinting AllowFingerprinting { get; set; }

@@ -317,6 +317,50 @@ class MediaManagement extends Component {
                     </FieldSet> : null
                 }
 
+                <FieldSet legend={translate('OrphanImport')}>
+                  <FormGroup size={sizes.MEDIUM}>
+                    <FormLabel>{translate('OrphanImportEnabled')}</FormLabel>
+
+                    <FormInputGroup
+                      type={inputTypes.CHECK}
+                      name="orphanImportEnabled"
+                      helpText={translate('OrphanImportEnabledHelpText')}
+                      onChange={onInputChange}
+                      {...settings.orphanImportEnabled}
+                    />
+                  </FormGroup>
+
+                  {
+                    settings.orphanImportEnabled.value ?
+                      <FormGroup size={sizes.MEDIUM}>
+                        <FormLabel>{translate('OrphanImportSubfolder')}</FormLabel>
+
+                        <FormInputGroup
+                          type={inputTypes.TEXT}
+                          name="orphanImportSubfolder"
+                          helpText={translate('OrphanImportSubfolderHelpText')}
+                          onChange={onInputChange}
+                          {...settings.orphanImportSubfolder}
+                        />
+                      </FormGroup> : null
+                  }
+
+                  {
+                    settings.orphanImportEnabled.value ?
+                      <FormGroup size={sizes.MEDIUM}>
+                        <FormLabel>{translate('OrphanImportWriteMarker')}</FormLabel>
+
+                        <FormInputGroup
+                          type={inputTypes.CHECK}
+                          name="orphanImportWriteMarker"
+                          helpText={translate('OrphanImportWriteMarkerHelpText')}
+                          onChange={onInputChange}
+                          {...settings.orphanImportWriteMarker}
+                        />
+                      </FormGroup> : null
+                  }
+                </FieldSet>
+
                 <FieldSet
                   legend={translate('FileManagement')}
                 >

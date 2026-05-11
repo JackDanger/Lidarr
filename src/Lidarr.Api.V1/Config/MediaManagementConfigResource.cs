@@ -30,6 +30,10 @@ namespace Lidarr.Api.V1.Config
         public string ScriptImportPath { get; set; }
         public bool ImportExtraFiles { get; set; }
         public string ExtraFileExtensions { get; set; }
+
+        public bool OrphanImportEnabled { get; set; }
+        public string OrphanImportSubfolder { get; set; }
+        public bool OrphanImportWriteMarker { get; set; }
     }
 
     public static class MediaManagementConfigResourceMapper
@@ -61,6 +65,10 @@ namespace Lidarr.Api.V1.Config
                 ScriptImportPath = model.ScriptImportPath,
                 ImportExtraFiles = model.ImportExtraFiles,
                 ExtraFileExtensions = model.ExtraFileExtensions,
+
+                OrphanImportEnabled = model.OrphanImportEnabled,
+                OrphanImportSubfolder = model.OrphanImportSubfolder,
+                OrphanImportWriteMarker = model.OrphanImportWriteMarker,
             };
         }
     }

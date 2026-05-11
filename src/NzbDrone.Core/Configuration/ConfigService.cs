@@ -242,6 +242,34 @@ namespace NzbDrone.Core.Configuration
             set { SetValue("ExtraFileExtensions", value); }
         }
 
+        // Orphan import (fork-specific). Defaults preserve the behaviour shipped
+        // before the settings existed: enabled, files filed under .unmatched/,
+        // marker txt written with provenance.
+        public bool OrphanImportEnabled
+        {
+            get { return GetValueBoolean("OrphanImportEnabled", true); }
+
+            set { SetValue("OrphanImportEnabled", value); }
+        }
+
+        public string OrphanImportSubfolder
+        {
+            // Empty / whitespace = drop the download folder directly under the
+            // artist's path with no wrapper subfolder. Use "" via the API to opt
+            // into that. Any non-empty value (default ".unmatched") is used as a
+            // dot-prefixed sibling so DiskScanService skips it on later scans.
+            get { return GetValue("OrphanImportSubfolder", ".unmatched"); }
+
+            set { SetValue("OrphanImportSubfolder", value); }
+        }
+
+        public bool OrphanImportWriteMarker
+        {
+            get { return GetValueBoolean("OrphanImportWriteMarker", true); }
+
+            set { SetValue("OrphanImportWriteMarker", value); }
+        }
+
         public bool WatchLibraryForChanges
         {
             get { return GetValueBoolean("WatchLibraryForChanges", true); }
