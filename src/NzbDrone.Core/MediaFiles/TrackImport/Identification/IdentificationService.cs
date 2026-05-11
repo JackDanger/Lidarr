@@ -257,6 +257,17 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Identification
 
             PopulateTracks(candidateReleases);
 
+            // Single-file gapless album short-circuit. If the local set is one file
+            // whose duration matches the total of an MB release, accept the file as
+            // covering all of that release's tracks (one TrackFile, many Tracks).
+            // The normal Hungarian mapping below would penalise this hard for "9 of
+            // 10 MB tracks unmatched" and reject the candidate.
+            if (TryGaplessSingleFileMatch(localAlbumRelease, candidateReleases))
+            {
+                _logger.Debug($"IdentifyRelease (gapless single-file) done in {watch.ElapsedMilliseconds}ms");
+                return;
+            }
+
             if (IsMultiDiscAlbum(localAlbumRelease))
             {
                 var multiDiscCandidates = candidateReleases
@@ -362,6 +373,12 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Identification
 
             PopulateTracks(candidateReleases);
 
+            if (TryGaplessSingleFileMatch(localAlbumRelease, candidateReleases))
+            {
+                _logger.Debug($"IdentifyReleaseAsync (gapless single-file) done in {watch.ElapsedMilliseconds}ms");
+                return;
+            }
+
             if (IsMultiDiscAlbum(localAlbumRelease))
             {
                 var multiDiscCandidates = candidateReleases
@@ -421,6 +438,104 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Identification
             localAlbumRelease.PopulateMatch();
 
             _logger.Debug($"IdentifyRelease done in {watch.ElapsedMilliseconds}ms");
+        }
+
+        // Single-file gapless album: one .flac/.mp3 contains the whole album's audio
+        // (no per-track splits). The normal Hungarian mapping would assign the file
+        // to one MB track and call the other N-1 tracks missing, inflating Distance
+        // past every spec's threshold. Here we look for a candidate whose total track
+        // duration matches the file's duration within tolerance, and if found, accept
+        // it as covering all N tracks.
+        //
+        // Lidarr's TrackFile schema already supports many-Tracks-to-one-TrackFile
+        // (Track.TrackFileId is a plain FK; multiple Tracks can share the same value).
+        // ImportApprovedTracks at L319 sets TrackFileId on every entry of
+        // localTrack.Tracks, so populating that list with all N MB tracks Just Works
+        // for the import side.
+        //
+        // We populate AlbumRelease, Distance, TrackMapping, and the LocalTrack's
+        // metadata fields inline (instead of letting GetBestRelease + PopulateMatch
+        // run), because PopulateMatch unconditionally rewrites localTrack.Tracks
+        // back to a single-element list from TrackMapping.Mapping[localTrack].
+        // Returning true tells the caller to skip those phases entirely.
+        private bool TryGaplessSingleFileMatch(LocalAlbumRelease localAlbumRelease, List<CandidateAlbumRelease> candidateReleases)
+        {
+            if (localAlbumRelease.LocalTracks.Count != 1)
+            {
+                return false;
+            }
+
+            var localTrack = localAlbumRelease.LocalTracks[0];
+            var fileDurationMs = localTrack.FileTrackInfo?.Duration.TotalMilliseconds ?? 0;
+            if (fileDurationMs < 60_000)
+            {
+                // Files under a minute aren't realistic full-album rips.
+                return false;
+            }
+
+            const double tolerance = 0.05; // 5% — tightened later if false positives appear
+
+            foreach (var candidate in candidateReleases)
+            {
+                var release = candidate.AlbumRelease;
+                var mbTracks = release.Tracks?.Value;
+                if (mbTracks == null || mbTracks.Count <= 1)
+                {
+                    continue;
+                }
+
+                var mbTotalMs = (double)mbTracks.Sum(t => t.Duration);
+                if (mbTotalMs <= 0)
+                {
+                    continue;
+                }
+
+                var ratio = fileDurationMs / mbTotalMs;
+                if (ratio < 1 - tolerance || ratio > 1 + tolerance)
+                {
+                    continue;
+                }
+
+                // Accept this candidate. Build the state PopulateMatch + GetBestRelease
+                // would normally produce, but with the LocalTrack linked to ALL MB tracks
+                // instead of just the first.
+                var fullTracks = mbTracks.ToList();
+                var orderedTracks = fullTracks
+                    .OrderBy(t => t.MediumNumber)
+                    .ThenBy(t => t.AbsoluteTrackNumber)
+                    .ToList();
+
+                localAlbumRelease.AlbumRelease = release;
+                localAlbumRelease.Distance = new Distance();
+                localAlbumRelease.TrackMapping = new TrackMapping
+                {
+                    Mapping = new Dictionary<LocalTrack, Tuple<Track, Distance>>
+                    {
+                        [localTrack] = Tuple.Create(orderedTracks[0], new Distance())
+                    },
+                    LocalExtra = new List<LocalTrack>(),
+                    MBExtra = new List<Track>()
+                };
+
+                localTrack.Release = release;
+                localTrack.Album = release.Album.Value;
+                localTrack.Artist = localTrack.Album.Artist.Value;
+                localTrack.Tracks = orderedTracks;
+                localTrack.Distance = new Distance();
+
+                _logger.Info(
+                    "Gapless single-file match: '{0}' covers {1} tracks of '{2}' ({3:0.0}min file vs {4:0.0}min album, {5:0.0}% ratio)",
+                    System.IO.Path.GetFileName(localTrack.Path),
+                    orderedTracks.Count,
+                    release,
+                    fileDurationMs / 60_000.0,
+                    mbTotalMs / 60_000.0,
+                    ratio * 100.0);
+
+                return true;
+            }
+
+            return false;
         }
 
         public void PopulateTracks(List<CandidateAlbumRelease> candidateReleases)
