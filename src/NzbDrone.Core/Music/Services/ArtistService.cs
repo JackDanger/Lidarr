@@ -20,7 +20,6 @@ namespace NzbDrone.Core.Music
         List<Artist> AddArtists(List<Artist> newArtists, bool doRefresh);
         Artist FindById(string foreignArtistId);
         Artist FindByName(string title);
-        List<Artist> FindAllByName(string title);
         Artist FindByNameInexact(string title);
         List<Artist> GetCandidates(string title);
         void DeleteArtist(int artistId, bool deleteFiles, bool addImportListExclusion = false);
@@ -111,11 +110,6 @@ namespace NzbDrone.Core.Music
         public Artist FindByName(string title)
         {
             return _artistRepository.FindByName(title.CleanArtistName());
-        }
-
-        public List<Artist> FindAllByName(string title)
-        {
-            return _artistRepository.FindAllByName(title.CleanArtistName());
         }
 
         public List<Tuple<Func<Artist, string, double>, string>> ArtistScoringFunctions(string title, string cleanTitle)

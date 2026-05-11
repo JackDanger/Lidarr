@@ -74,9 +74,9 @@ namespace NzbDrone.Core.MediaFiles.Extraction
             var extracted = false;
             foreach (var file in allFiles)
             {
-                if (File.Exists(file + MarkerSuffix))
+                if (_diskProvider.FileExists(file + MarkerSuffix))
                 {
-                    continue; // already done
+                    continue;
                 }
 
                 var extractor = _extractors.FirstOrDefault(e => e.CanHandle(file));
@@ -117,7 +117,10 @@ namespace NzbDrone.Core.MediaFiles.Extraction
         {
             try
             {
-                File.WriteAllText(archivePath + MarkerSuffix,
+                // _diskProvider.WriteAllText (vs File.WriteAllText) avoids a known
+                // .NET Core bug on CIFS-mounted folders — see DiskProviderBase.
+                _diskProvider.WriteAllText(
+                    archivePath + MarkerSuffix,
                     $"{extractorName}\n{System.DateTime.UtcNow:o}\n");
             }
             catch (System.Exception ex)

@@ -204,16 +204,15 @@ namespace NzbDrone.Core.Parser
             {
                 artist = _artistService.FindByName(parsedAlbumInfo.ArtistName);
             }
-            catch (MultipleArtistsFoundException)
+            catch (MultipleArtistsFoundException ex)
             {
                 // Two or more local artists share the same CleanName (e.g. two MB
                 // entries both named "Djo"). Disambiguate by checking which candidate
-                // owns an album whose title matches the parsed release's album. If
-                // exactly one matches, that's our artist; otherwise we can't tell
-                // from the indexer string alone — log and skip the release rather
-                // than dropping it on a thrown exception that pollutes the log every
-                // RSS sync. The user can manually disambiguate via search later.
-                artist = ResolveAmbiguousArtist(parsedAlbumInfo);
+                // owns an album whose title matches the parsed release's album.
+                // Without this, the exception bubbles all the way to
+                // DownloadDecisionMaker and the release gets dropped on every RSS
+                // sync with a "Couldn't process release" error.
+                artist = ResolveAmbiguousArtist(parsedAlbumInfo, ex.Artists);
             }
 
             if (artist == null)
@@ -239,12 +238,11 @@ namespace NzbDrone.Core.Parser
         // Returning null lets the rest of the parse fall through to "No matching
         // artist", which is the same outcome the throw produced but without the
         // per-release error log.
-        private Artist ResolveAmbiguousArtist(ParsedAlbumInfo parsedAlbumInfo)
+        private Artist ResolveAmbiguousArtist(ParsedAlbumInfo parsedAlbumInfo, List<Artist> candidates)
         {
-            var candidates = _artistService.FindAllByName(parsedAlbumInfo.ArtistName);
-            if (candidates.Count <= 1)
+            if (candidates == null || candidates.Count <= 1)
             {
-                return candidates.FirstOrDefault();
+                return candidates?.FirstOrDefault();
             }
 
             var displayName = candidates.First().Name;

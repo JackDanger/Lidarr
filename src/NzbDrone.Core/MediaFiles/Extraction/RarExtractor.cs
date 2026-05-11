@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Text.RegularExpressions;
 using NLog;
+using NzbDrone.Common.EnvironmentInfo;
 using NzbDrone.Common.Processes;
 
 namespace NzbDrone.Core.MediaFiles.Extraction
@@ -55,37 +56,28 @@ namespace NzbDrone.Core.MediaFiles.Extraction
 
         public bool Extract(string archivePath, string destinationFolder)
         {
-            try
+            // unrar-free (Debian default) doesn't recognise `-o+`; the proprietary
+            // unrar accepts both. Plain `-y` covers both.
+            var destWithSlash = destinationFolder.TrimEnd('/', '\\') + Path.DirectorySeparatorChar;
+            var args = $"x -y \"{archivePath}\" \"{destWithSlash}\"";
+            var output = _processProvider.StartAndCapture("unrar", args);
+            if (output.ExitCode == 0)
             {
-                // `unrar x -y <archive> <dest>/` — extract with full paths, assume yes
-                // to prompts, destination trailing-slash makes unrar treat it as dir.
-                // Note: unrar-free (Debian default) doesn't recognise `-o+`, but it
-                // overwrites by default; the proprietary unrar accepts both.
-                var destWithSlash = destinationFolder.TrimEnd('/', '\\') + Path.DirectorySeparatorChar;
-                var args = $"x -y \"{archivePath}\" \"{destWithSlash}\"";
-                var output = _processProvider.StartAndCapture("unrar", args);
-                if (output.ExitCode == 0)
-                {
-                    return true;
-                }
+                return true;
+            }
 
-                _logger.Warn(
-                    "unrar exited {0} for {1}: {2}",
-                    output.ExitCode,
-                    archivePath,
-                    output.Lines);
-                return false;
-            }
-            catch (Exception ex)
-            {
-                _logger.Warn(ex, "RarExtractor: failed extracting {0}", archivePath);
-                return false;
-            }
+            _logger.Warn(
+                "unrar exited {0} for {1}: {2}",
+                output.ExitCode,
+                archivePath,
+                output.Lines);
+            return false;
         }
 
         // Cheap PATH walk to confirm `unrar` is callable. Avoids invoking the binary
         // (any invocation produces stderr that shows up as Error log lines) and
-        // covers both proprietary `unrar` and Debian's `unrar-free`.
+        // covers both proprietary `unrar` and Debian's `unrar-free`. Probes the
+        // ".exe" suffix on Windows for parity with FingerprintingService.GetFpcalcPath.
         private static bool ProbeAvailable()
         {
             var pathEnv = Environment.GetEnvironmentVariable("PATH");
@@ -93,6 +85,8 @@ namespace NzbDrone.Core.MediaFiles.Extraction
             {
                 return false;
             }
+
+            var binaryName = OsInfo.IsWindows ? "unrar.exe" : "unrar";
 
             foreach (var dir in pathEnv.Split(Path.PathSeparator))
             {
@@ -103,7 +97,7 @@ namespace NzbDrone.Core.MediaFiles.Extraction
 
                 try
                 {
-                    if (File.Exists(Path.Combine(dir, "unrar")))
+                    if (File.Exists(Path.Combine(dir, binaryName)))
                     {
                         return true;
                     }

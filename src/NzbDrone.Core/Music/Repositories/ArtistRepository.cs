@@ -11,7 +11,6 @@ namespace NzbDrone.Core.Music
     {
         bool ArtistPathExists(string path);
         Artist FindByName(string cleanName);
-        List<Artist> FindAllByName(string cleanName);
         Artist FindById(string foreignArtistId);
         Dictionary<int, string> AllArtistPaths();
         Dictionary<int, List<int>> AllArtistsTags();
@@ -65,16 +64,6 @@ namespace NzbDrone.Core.Music
             var artists = Query(s => s.CleanName == cleanName).ToList();
 
             return ReturnSingleArtistOrThrow(artists);
-        }
-
-        // Non-throwing variant: returns all artists whose CleanName matches.
-        // Used by ParsingService to disambiguate name-collisions (multiple distinct
-        // MB artists sharing the same display name, e.g. two "Djo"s) by inspecting
-        // each candidate's albums against the parsed release's album title.
-        public List<Artist> FindAllByName(string cleanName)
-        {
-            cleanName = cleanName.ToLowerInvariant();
-            return Query(s => s.CleanName == cleanName).ToList();
         }
 
         public Artist GetArtistByMetadataId(int artistMetadataId)

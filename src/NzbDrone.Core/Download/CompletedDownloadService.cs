@@ -38,6 +38,7 @@ namespace NzbDrone.Core.Download
         private readonly ITrackedDownloadAlreadyImported _trackedDownloadAlreadyImported;
         private readonly IExtractionService _extractionService;
         private readonly IDiskProvider _diskProvider;
+        private readonly IDiskScanService _diskScanService;
         private readonly IConfigService _configService;
         private readonly Logger _logger;
 
@@ -50,6 +51,7 @@ namespace NzbDrone.Core.Download
                                         ITrackedDownloadAlreadyImported trackedDownloadAlreadyImported,
                                         IExtractionService extractionService,
                                         IDiskProvider diskProvider,
+                                        IDiskScanService diskScanService,
                                         IConfigService configService,
                                         Logger logger)
         {
@@ -62,6 +64,7 @@ namespace NzbDrone.Core.Download
             _trackedDownloadAlreadyImported = trackedDownloadAlreadyImported;
             _extractionService = extractionService;
             _diskProvider = diskProvider;
+            _diskScanService = diskScanService;
             _configService = configService;
             _logger = logger;
         }
@@ -163,16 +166,16 @@ namespace NzbDrone.Core.Download
                 return;
             }
 
+            var outputPath = trackedDownload.ImportItem.OutputPath.FullPath;
+
             // Extract any archives we recognise BEFORE setting Importing state and BEFORE
             // ProcessPath scans for audio. The marker file convention makes this idempotent
             // across refreshes; on the first pass after a .tar lands, audio appears for
             // free. See src/NzbDrone.Core/MediaFiles/Extraction/ExtractionService.cs.
-            var preExtractOutput = trackedDownload.ImportItem.OutputPath.FullPath;
-            _extractionService.ExtractIfNeeded(preExtractOutput);
+            _extractionService.ExtractIfNeeded(outputPath);
 
             trackedDownload.State = TrackedDownloadState.Importing;
 
-            var outputPath = trackedDownload.ImportItem.OutputPath.FullPath;
             List<ImportResult> importResults;
 
             try
@@ -401,10 +404,6 @@ namespace NzbDrone.Core.Download
             var hasBlocker = false;
             foreach (var group in groups)
             {
-                // Pick the entries that carry actual reasons. If Messages is non-empty
-                // the reasons live there (Title is a per-file label like a filename).
-                // If Messages is empty, the reason is in Title (V5 single-rejection
-                // path, or our header-only "One or more tracks expected..." entry).
                 List<string> reasons;
                 if (group.Messages != null && group.Messages.Count > 0)
                 {
@@ -567,10 +566,9 @@ namespace NzbDrone.Core.Download
                 return false;
             }
 
-            var allFiles = _diskProvider.GetFiles(outputPath, true).ToList();
-            var audioFiles = allFiles
-                .Where(f => MediaFileExtensions.Extensions.Contains(Path.GetExtension(f)))
-                .ToList();
+            // GetAudioFiles applies DiskScanService's exclusion regex (._*, .DS_Store,
+            // dot-prefixed folders, etc.) so we don't carry junk into the destination.
+            var audioFiles = _diskScanService.GetAudioFiles(outputPath).ToList();
 
             if (audioFiles.Count == 0)
             {
@@ -583,11 +581,6 @@ namespace NzbDrone.Core.Download
                 downloadFolderName = "unknown-" + DateTime.UtcNow.ToString("yyyyMMdd-HHmmss");
             }
 
-            // Subfolder is configurable: empty/whitespace = drop the download
-            // folder directly under the artist's path with no wrapper. A non-empty
-            // value is used as a sibling subfolder; if the user keeps the default
-            // ".unmatched" the dot prefix means DiskScanService skips it on later
-            // scans (preventing re-import attempts on the same files).
             var subfolder = (_configService.OrphanImportSubfolder ?? string.Empty).Trim();
             var destinationRoot = string.IsNullOrEmpty(subfolder)
                 ? Path.Combine(artist.Path, downloadFolderName)
@@ -597,19 +590,21 @@ namespace NzbDrone.Core.Download
             {
                 _diskProvider.CreateFolder(destinationRoot);
 
+                string lastDestDir = null;
                 foreach (var file in audioFiles)
                 {
                     // Preserve the file's relative location so multi-disc / discography
                     // structure inside the download is intact at the destination.
-                    var relative = file.Substring(outputPath.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                    var relative = outputPath.GetRelativePath(file.FullName);
                     var destination = Path.Combine(destinationRoot, relative);
                     var destDir = Path.GetDirectoryName(destination);
-                    if (!string.IsNullOrEmpty(destDir))
+                    if (!string.IsNullOrEmpty(destDir) && destDir != lastDestDir)
                     {
                         _diskProvider.CreateFolder(destDir);
+                        lastDestDir = destDir;
                     }
 
-                    _diskProvider.MoveFile(file, destination, overwrite: true);
+                    _diskProvider.MoveFile(file.FullName, destination, overwrite: true);
                 }
 
                 if (_configService.OrphanImportWriteMarker)
@@ -658,16 +653,12 @@ namespace NzbDrone.Core.Download
                 lines.Add(string.Empty);
                 lines.Add("These files have NOT been linked to a Lidarr Album record. Use the manual");
                 lines.Add("import UI on the parent folder to disambiguate, or move them into the");
-                lines.Add("appropriate album folder by hand.");
-                lines.Add(string.Empty);
-                lines.Add("Behaviour controlled by Settings → Media Management → Orphan Import:");
-                lines.Add("  - 'Subfolder name' (default '.unmatched'). A dot-prefixed value keeps");
-                lines.Add("    these files out of Lidarr's disk scans; a non-dotted name (or empty");
-                lines.Add("    for direct-into-artist-folder) means future scans will see them.");
-                lines.Add("  - 'Write provenance marker' generates this file. Disable to leave");
-                lines.Add("    only the moved audio with no sidecar.");
+                lines.Add("appropriate album folder by hand. See Settings → Media Management → Orphan");
+                lines.Add("Import for placement and marker controls.");
 
-                File.WriteAllText(Path.Combine(destinationRoot, "_lidarr-unmatched.txt"), string.Join("\n", lines));
+                // _diskProvider.WriteAllText (vs File.WriteAllText) avoids a known
+                // .NET Core bug on CIFS-mounted folders — see DiskProviderBase.
+                _diskProvider.WriteAllText(Path.Combine(destinationRoot, "_lidarr-unmatched.txt"), string.Join("\n", lines));
             }
             catch (Exception ex)
             {
