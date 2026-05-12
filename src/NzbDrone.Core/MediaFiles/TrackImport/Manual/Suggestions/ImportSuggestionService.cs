@@ -16,27 +16,38 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Manual.Suggestions
     // about?" — used when the in-library identification path returned nothing
     // matchable. Results are filtered through ImportListExclusion so we never
     // suggest an artist or album the user has actively excluded.
+    //
+    // Implementation note: we go via ISearchForNewArtist + IProvideArtistInfo
+    // rather than ISearchForNewAlbum on purpose. The Lidarr-metadata-daemon
+    // mirror this deploy runs against returns 0 for `type=album` searches
+    // (only `type=artist` and the `/artist/{mbid}` detail endpoint behave) —
+    // the artist→album-list path works on both that and the upstream Servarr
+    // metadata service, so this is the portable choice.
     public class ImportSuggestionService : IImportSuggestionService
     {
-        // Search for the user's existing tuning: bumping this between releases
-        // is exactly the workflow this fork was built for.
+        // Default tuned by gut; the user actively iterates this value via
+        // commits on this branch as real downloads reveal score distributions.
         private const double DefaultThreshold = 0.7;
 
-        // SkyHookProxy's album search is generous — we cap candidates to keep
-        // scoring time bounded for downloads that produce a busy hit list.
-        private const int MaxCandidatesToScore = 8;
+        // Cap on artist candidates we'll fetch full info for. Every artist
+        // costs one metadata-API round trip, so we want this small. Most cases
+        // resolve on the top result anyway.
+        private const int MaxArtistsToFetch = 3;
 
-        private readonly ISearchForNewAlbum _albumSearch;
+        private readonly ISearchForNewArtist _artistSearch;
+        private readonly IProvideArtistInfo _artistInfo;
         private readonly IImportListExclusionService _exclusionService;
         private readonly IConfigService _configService;
         private readonly Logger _logger;
 
-        public ImportSuggestionService(ISearchForNewAlbum albumSearch,
+        public ImportSuggestionService(ISearchForNewArtist artistSearch,
+                                       IProvideArtistInfo artistInfo,
                                        IImportListExclusionService exclusionService,
                                        IConfigService configService,
                                        Logger logger)
         {
-            _albumSearch = albumSearch;
+            _artistSearch = artistSearch;
+            _artistInfo = artistInfo;
             _exclusionService = exclusionService;
             _configService = configService;
             _logger = logger;
@@ -49,13 +60,12 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Manual.Suggestions
                 return null;
             }
 
-            // Pull the most common (artist, album) tuple from the file tags —
-            // unless the folder is genuinely heterogeneous, one tuple covers
-            // all the files and a single MB lookup answers the whole folder.
             var artistTitle = MostCommon(localTracks, t => t.FileTrackInfo?.ArtistTitle);
             var albumTitle = MostCommon(localTracks, t => t.FileTrackInfo?.AlbumTitle);
 
-            if (albumTitle.IsNullOrWhiteSpace())
+            // Need at least one of the two to have a shot at a useful query.
+            // In practice both are present on Picard-tagged rips.
+            if (artistTitle.IsNullOrWhiteSpace() || albumTitle.IsNullOrWhiteSpace())
             {
                 return null;
             }
@@ -63,83 +73,131 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Manual.Suggestions
             var threshold = GetThreshold();
             if (threshold >= 1.0)
             {
-                // Setting effectively turns the feature off.
                 return null;
             }
 
-            List<Album> candidates;
+            // Step 1: find candidate artists by fuzzy name search.
+            List<Artist> artistCandidates;
             try
             {
-                candidates = _albumSearch.SearchForNewAlbum(albumTitle, artistTitle ?? string.Empty) ?? new List<Album>();
+                artistCandidates = _artistSearch.SearchForNewArtist(artistTitle) ?? new List<Artist>();
             }
             catch (Exception ex)
             {
-                _logger.Debug(ex, "Suggestion lookup failed for '{0}' / '{1}'", artistTitle, albumTitle);
+                _logger.Debug(ex, "Suggestion: artist search failed for '{0}'", artistTitle);
                 return null;
             }
 
-            if (candidates.Count == 0)
+            if (artistCandidates.Count == 0)
             {
                 return null;
             }
 
-            // Bulk-load exclusions for every MBID we'd consider. Single repo round
-            // trip beats N FindByForeignId calls for boxy hit lists.
-            var allForeignIds = candidates
-                .Take(MaxCandidatesToScore)
-                .SelectMany(a => new[] { a?.ForeignAlbumId, a?.ArtistMetadata?.Value?.ForeignArtistId })
-                .Where(s => !string.IsNullOrWhiteSpace(s))
+            // Step 2: bulk-fetch exclusions for the top-N artist MBIDs so we
+            // can short-circuit excluded artists before paying for their album
+            // list. We re-check album MBIDs against the same set later.
+            var topArtists = artistCandidates.Take(MaxArtistsToFetch).ToList();
+            var artistIds = topArtists
+                .Select(a => a?.Metadata?.Value?.ForeignArtistId)
+                .Where(id => !string.IsNullOrWhiteSpace(id))
                 .Distinct()
                 .ToList();
 
-            var excludedIds = allForeignIds.Count == 0
+            var excludedIds = artistIds.Count == 0
                 ? new HashSet<string>()
-                : _exclusionService.FindByForeignId(allForeignIds)
+                : _exclusionService.FindByForeignId(artistIds)
                     .Select(e => e.ForeignId)
                     .ToHashSet();
 
             ImportSuggestion best = null;
             var localTrackCount = localTracks.Count;
 
-            foreach (var album in candidates.Take(MaxCandidatesToScore))
+            foreach (var artistCandidate in topArtists)
             {
-                if (album == null)
-                {
-                    continue;
-                }
-
-                var artistMeta = album.ArtistMetadata?.Value;
-                var albumMbid = album.ForeignAlbumId;
+                var artistMeta = artistCandidate?.Metadata?.Value;
                 var artistMbid = artistMeta?.ForeignArtistId;
-
-                if (albumMbid.IsNotNullOrWhiteSpace() && excludedIds.Contains(albumMbid))
+                if (artistMbid.IsNullOrWhiteSpace() || excludedIds.Contains(artistMbid))
                 {
                     continue;
                 }
 
-                if (artistMbid.IsNotNullOrWhiteSpace() && excludedIds.Contains(artistMbid))
+                Artist fullArtist;
+                try
+                {
+                    // metadataProfileId=0 → SkyHookProxy.FilterAlbums falls back
+                    // to the first available profile, which is what we want for
+                    // a read-only suggestion lookup.
+                    fullArtist = _artistInfo.GetArtistInfo(artistMbid, 0);
+                }
+                catch (Exception ex)
+                {
+                    _logger.Debug(ex, "Suggestion: artist info fetch failed for {0}", artistMbid);
+                    continue;
+                }
+
+                var albums = fullArtist?.Albums?.Value;
+                if (albums == null || albums.Count == 0)
                 {
                     continue;
                 }
 
-                var score = ScoreCandidate(album, artistTitle, albumTitle, localTrackCount, out var mbTrackCount);
-                if (best == null || score > best.Score)
+                // Bulk-check the artist's album MBIDs against exclusions in
+                // one round trip rather than one per album.
+                var albumIds = albums
+                    .Select(a => a.ForeignAlbumId)
+                    .Where(id => !string.IsNullOrWhiteSpace(id))
+                    .Distinct()
+                    .ToList();
+                var excludedAlbumIds = albumIds.Count == 0
+                    ? new HashSet<string>()
+                    : _exclusionService.FindByForeignId(albumIds)
+                        .Select(e => e.ForeignId)
+                        .ToHashSet();
+
+                foreach (var album in albums)
                 {
-                    best = new ImportSuggestion
+                    var albumMbid = album.ForeignAlbumId;
+                    if (albumMbid.IsNotNullOrWhiteSpace() && excludedAlbumIds.Contains(albumMbid))
                     {
-                        ArtistName = artistMeta?.Name,
-                        ArtistMBID = artistMbid,
-                        AlbumName = album.Title,
-                        AlbumMBID = albumMbid,
-                        Score = score,
-                        MbTrackCount = mbTrackCount,
-                        LocalTrackCount = localTrackCount,
-                    };
+                        continue;
+                    }
+
+                    // Hot path optimisation — pre-filter by a cheap cleaned
+                    // string compare before paying for the full Distance pass.
+                    // Don't bother scoring albums whose title shares no chars
+                    // with the file tag.
+                    if (!ShareSomeAlphanumerics(albumTitle, album.Title))
+                    {
+                        continue;
+                    }
+
+                    var score = ScoreCandidate(album, fullArtist, artistTitle, albumTitle, localTrackCount, out var mbTrackCount);
+                    if (best == null || score > best.Score)
+                    {
+                        best = new ImportSuggestion
+                        {
+                            ArtistName = fullArtist?.Metadata?.Value?.Name ?? artistMeta?.Name,
+                            ArtistMBID = artistMbid,
+                            AlbumName = album.Title,
+                            AlbumMBID = albumMbid,
+                            Score = score,
+                            MbTrackCount = mbTrackCount,
+                            LocalTrackCount = localTrackCount,
+                        };
+                    }
                 }
             }
 
             if (best == null || best.Score < threshold)
             {
+                _logger.Debug(
+                    "Suggestion: best candidate '{0} - {1}' scored {2:F2} (threshold {3:F2}) for tagged '{4}' / '{5}'",
+                    best?.ArtistName,
+                    best?.AlbumName,
+                    best?.Score ?? 0,
+                    threshold,
+                    artistTitle,
+                    albumTitle);
                 return null;
             }
 
@@ -153,11 +211,34 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Manual.Suggestions
             return best;
         }
 
+        private static bool ShareSomeAlphanumerics(string a, string b)
+        {
+            var ca = NormalizeForCompare(a);
+            var cb = NormalizeForCompare(b);
+            if (ca.Length == 0 || cb.Length == 0)
+            {
+                return false;
+            }
+
+            // Trigram-ish: do they share at least one 3-char run? Cheap, and
+            // false-positives are fine (just means we waste a Distance call).
+            for (var i = 0; i <= ca.Length - 3; i++)
+            {
+                if (cb.IndexOf(ca.Substring(i, 3), StringComparison.Ordinal) >= 0)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         // Score against the file tags using the same Distance machinery
         // IdentificationService uses internally. Returns a match score in [0, 1]
         // where 1.0 is a perfect match.
         private static double ScoreCandidate(
             Album album,
+            Artist artist,
             string fileArtist,
             string fileAlbum,
             int fileTrackCount,
@@ -171,7 +252,7 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Manual.Suggestions
             // Artist — take the best similarity across the canonical name and
             // every known alias. This is what lets "The Spooky Kids" match
             // Marilyn Manson without the user having to know the alias.
-            var artistDistance = BestArtistDistance(fileArtist, album.ArtistMetadata?.Value);
+            var artistDistance = BestArtistDistance(fileArtist, artist?.Metadata?.Value);
             dist.Add("artist", artistDistance);
 
             // Track count — if we can read it from the first release. Cheap
