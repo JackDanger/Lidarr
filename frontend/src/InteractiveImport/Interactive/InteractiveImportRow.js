@@ -187,6 +187,7 @@ class InteractiveImportRow extends Component {
       customFormats,
       indexerFlags,
       rejections,
+      suggestion,
       columns,
       isReprocessing,
       audioTags,
@@ -393,6 +394,42 @@ class InteractiveImportRow extends Component {
               /> :
               null
           }
+
+          {
+            suggestion ?
+              <Popover
+                anchor={
+                  <Icon
+                    name={icons.INFO}
+                    kind={kinds.SUCCESS}
+                  />
+                }
+                title={translate('SuggestedMatch')}
+                body={
+                  <div>
+                    <div>
+                      <strong>{suggestion.artistName}</strong>
+                    </div>
+                    <div>
+                      {suggestion.albumName}
+                    </div>
+                    <div>
+                      {translate('Score')}: {Math.round(suggestion.score * 100)}%
+                    </div>
+                    {
+                      suggestion.mbTrackCount > 0 ?
+                        <div>
+                          {translate('Tracks')}: {suggestion.localTrackCount} / {suggestion.mbTrackCount}
+                        </div> :
+                        null
+                    }
+                  </div>
+                }
+                position={tooltipPositions.LEFT}
+                canFlip={false}
+              /> :
+              null
+          }
         </TableRowCell>
 
         <SelectArtistModal
@@ -464,6 +501,7 @@ InteractiveImportRow.propTypes = {
   customFormats: PropTypes.arrayOf(PropTypes.object),
   indexerFlags: PropTypes.number.isRequired,
   rejections: PropTypes.arrayOf(PropTypes.object).isRequired,
+  suggestion: PropTypes.object,
   columns: PropTypes.arrayOf(PropTypes.object).isRequired,
   audioTags: PropTypes.object.isRequired,
   additionalFile: PropTypes.bool.isRequired,
