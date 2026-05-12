@@ -53,7 +53,25 @@ namespace NzbDrone.Core.Parser
                 title = parsedAlbumInfo.ArtistName;
             }
 
-            var artistInfo = _artistService.FindByName(title);
+            Artist artistInfo;
+            try
+            {
+                artistInfo = _artistService.FindByName(title);
+            }
+            catch (MultipleArtistsFoundException ex)
+            {
+                // Same disambiguation we apply on the private ParsedAlbumInfo path:
+                // two local artists share the same CleanName (real-world cases on
+                // this deploy: 'Bodysnatcher', 'Djo'), the repository throws, and
+                // every caller of this public overload (DownloadMonitoringService
+                // among them) loses the tracked download with a "Couldn't process"
+                // error every refresh. Resolve via album context when we have a
+                // parse, otherwise let null fall through to the existing "no
+                // matching artist" branch.
+                artistInfo = parsedAlbumInfo != null
+                    ? ResolveAmbiguousArtist(parsedAlbumInfo, ex.Artists)
+                    : null;
+            }
 
             if (artistInfo == null)
             {
