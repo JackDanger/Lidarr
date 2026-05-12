@@ -9,6 +9,7 @@ using NzbDrone.Core.MediaFiles.TrackImport.Identification;
 using NzbDrone.Core.MetadataSource;
 using NzbDrone.Core.Music;
 using NzbDrone.Core.Parser.Model;
+using NzbDrone.Core.Profiles.Metadata;
 
 namespace NzbDrone.Core.MediaFiles.TrackImport.Manual.Suggestions
 {
@@ -36,21 +37,51 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Manual.Suggestions
 
         private readonly ISearchForNewArtist _artistSearch;
         private readonly IProvideArtistInfo _artistInfo;
+        private readonly IMetadataProfileService _profileService;
         private readonly IImportListExclusionService _exclusionService;
         private readonly IConfigService _configService;
         private readonly Logger _logger;
 
         public ImportSuggestionService(ISearchForNewArtist artistSearch,
                                        IProvideArtistInfo artistInfo,
+                                       IMetadataProfileService profileService,
                                        IImportListExclusionService exclusionService,
                                        IConfigService configService,
                                        Logger logger)
         {
             _artistSearch = artistSearch;
             _artistInfo = artistInfo;
+            _profileService = profileService;
             _exclusionService = exclusionService;
             _configService = configService;
             _logger = logger;
+        }
+
+        // Pick the user's most-permissive metadata profile for the artist-info
+        // fetch. SkyHookProxy.GetArtistInfo's FilterAlbums step would otherwise
+        // drop everything not allowed by the FIRST profile in the user's list —
+        // which on this deploy is "None" (zero allowed types), filtering all
+        // 318 of an artist's albums out. For *suggesting* a match we want the
+        // widest possible candidate pool regardless of which profile the user
+        // would use to auto-fetch new releases.
+        private int PickPermissiveProfileId()
+        {
+            var profiles = _profileService.All();
+            if (profiles == null || profiles.Count == 0)
+            {
+                return 0;
+            }
+
+            return profiles
+                .Select(p => new
+                {
+                    p.Id,
+                    Score = (p.PrimaryAlbumTypes?.Count(x => x.Allowed) ?? 0)
+                        + (p.SecondaryAlbumTypes?.Count(x => x.Allowed) ?? 0),
+                })
+                .OrderByDescending(x => x.Score)
+                .First()
+                .Id;
         }
 
         public ImportSuggestion FindForTracks(IReadOnlyList<LocalTrack> localTracks)
@@ -132,10 +163,7 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Manual.Suggestions
                 Artist fullArtist;
                 try
                 {
-                    // metadataProfileId=0 → SkyHookProxy.FilterAlbums falls back
-                    // to the first available profile, which is what we want for
-                    // a read-only suggestion lookup.
-                    fullArtist = _artistInfo.GetArtistInfo(artistMbid, 0);
+                    fullArtist = _artistInfo.GetArtistInfo(artistMbid, PickPermissiveProfileId());
                 }
                 catch (Exception ex)
                 {
