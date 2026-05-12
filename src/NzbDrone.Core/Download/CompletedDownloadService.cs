@@ -10,6 +10,7 @@ using NzbDrone.Common.Instrumentation.Extensions;
 using NzbDrone.Core.Configuration;
 using NzbDrone.Core.Download.TrackedDownloads;
 using NzbDrone.Core.History;
+using NzbDrone.Core.ImportLists.Exclusions;
 using NzbDrone.Core.MediaFiles;
 using NzbDrone.Core.MediaFiles.Events;
 using NzbDrone.Core.MediaFiles.Extraction;
@@ -41,6 +42,7 @@ namespace NzbDrone.Core.Download
         private readonly IDiskScanService _diskScanService;
         private readonly IConfigService _configService;
         private readonly IFailedDownloadService _failedDownloadService;
+        private readonly IImportListExclusionService _exclusionService;
         private readonly Logger _logger;
 
         public CompletedDownloadService(IEventAggregator eventAggregator,
@@ -55,6 +57,7 @@ namespace NzbDrone.Core.Download
                                         IDiskScanService diskScanService,
                                         IConfigService configService,
                                         IFailedDownloadService failedDownloadService,
+                                        IImportListExclusionService exclusionService,
                                         Logger logger)
         {
             _eventAggregator = eventAggregator;
@@ -69,6 +72,7 @@ namespace NzbDrone.Core.Download
             _diskScanService = diskScanService;
             _configService = configService;
             _failedDownloadService = failedDownloadService;
+            _exclusionService = exclusionService;
             _logger = logger;
         }
 
@@ -216,6 +220,28 @@ namespace NzbDrone.Core.Download
         // into Imported/ImportBlocked before falling through to ImportFailed.
         private void ClassifyAndSetState(TrackedDownload trackedDownload, List<ImportResult> importResults, string outputPath)
         {
+            // (User-curated exclusion) The file's tags identify it as part of an
+            // artist or album the user has explicitly excluded via the Add-list-
+            // exclusion checkbox on artist/album delete. That's an active
+            // preference, not a passive "skip in import lists" flag — honour it
+            // by terminal-failing the download. Same severity as a malware
+            // payload: blocklist + remove from download client + don't re-grab.
+            if (_configService.RespectExclusionsOnImport)
+            {
+                var excluded = FindExcludedMatch(importResults);
+                if (excluded != null)
+                {
+                    _logger.Warn(
+                        "Download {0} is tagged for excluded {1} '{2}' (MBID {3}) — marking failed and removing",
+                        trackedDownload.DownloadItem.Title,
+                        excluded.Kind,
+                        excluded.Name,
+                        excluded.ForeignId);
+                    _failedDownloadService.MarkAsFailed(trackedDownload, skipRedownload: true);
+                    return;
+                }
+            }
+
             // (V3) The download contained no files Lidarr could even attempt to import
             // (Blu-ray ISO, SACD video, archive that wasn't extracted, empty folder).
             // Retrying won't help — the file set on disk doesn't change shape between
@@ -565,6 +591,77 @@ namespace NzbDrone.Core.Download
         //   - A `_lidarr-unmatched.txt` marker is dropped in the destination
         //     folder with download title, timestamp, and the rejection reasons
         //     so the user can see what happened later.
+        // Result of an exclusion-match lookup. Carries enough to log clearly
+        // and (later) to surface in the modal as "rejected by user preference".
+        private sealed class ExcludedMatch
+        {
+            public string Kind { get; init; }
+            public string Name { get; init; }
+            public string ForeignId { get; init; }
+        }
+
+        // Walk the parsed file tags of every importResult; if any file's
+        // ArtistMBId or AlbumMBId is in the user's ImportListExclusion table,
+        // return the first hit. Returns null if no MBIDs match (or no MBIDs
+        // were tagged — the MB-name lookup fallback for untagged files arrives
+        // with feature (b) and is intentionally out of scope here).
+        private ExcludedMatch FindExcludedMatch(List<ImportResult> importResults)
+        {
+            var mbids = importResults
+                .Select(r => r.ImportDecision?.Item?.FileTrackInfo)
+                .Where(t => t != null)
+                .SelectMany(t => new[] { t.ArtistMBId, t.AlbumMBId, t.ReleaseMBId })
+                .Where(m => !string.IsNullOrWhiteSpace(m))
+                .Distinct()
+                .ToList();
+
+            if (mbids.Count == 0)
+            {
+                return null;
+            }
+
+            var exclusions = _exclusionService.FindByForeignId(mbids);
+            if (exclusions.Count == 0)
+            {
+                return null;
+            }
+
+            var hit = exclusions[0];
+
+            // Heuristic: artist MBIDs from MB are bare GUIDs; album and release
+            // MBIDs are too, so we can't tell them apart by shape. Cross-reference
+            // against the per-file tags to label the kind for the log line. Falls
+            // back to "match" if we can't decide cleanly.
+            var kind = "match";
+            foreach (var r in importResults)
+            {
+                var t = r.ImportDecision?.Item?.FileTrackInfo;
+                if (t == null)
+                {
+                    continue;
+                }
+
+                if (t.ArtistMBId == hit.ForeignId)
+                {
+                    kind = "artist";
+                    break;
+                }
+
+                if (t.AlbumMBId == hit.ForeignId || t.ReleaseMBId == hit.ForeignId)
+                {
+                    kind = "album";
+                    break;
+                }
+            }
+
+            return new ExcludedMatch
+            {
+                Kind = kind,
+                Name = hit.Name,
+                ForeignId = hit.ForeignId,
+            };
+        }
+
         // True iff ExtractionService has previously unpacked at least one archive
         // under outputPath and no audio remains for import. The marker (suffix
         // ExtractionService.MarkerSuffix, written only after a successful extract)

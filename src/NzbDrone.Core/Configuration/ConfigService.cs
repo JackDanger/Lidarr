@@ -270,6 +270,13 @@ namespace NzbDrone.Core.Configuration
             set { SetValue("OrphanImportWriteMarker", value); }
         }
 
+        public bool RespectExclusionsOnImport
+        {
+            get { return GetValueBoolean("RespectExclusionsOnImport", true); }
+
+            set { SetValue("RespectExclusionsOnImport", value); }
+        }
+
         public bool WatchLibraryForChanges
         {
             get { return GetValueBoolean("WatchLibraryForChanges", true); }

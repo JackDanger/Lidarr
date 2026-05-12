@@ -47,6 +47,13 @@ namespace NzbDrone.Core.Configuration
         string OrphanImportSubfolder { get; set; }
         bool OrphanImportWriteMarker { get; set; }
 
+        // When true (default), the import pipeline consults ImportListExclusion
+        // before importing — files whose tags resolve to an excluded MBID get
+        // terminal-failed (blocklist + remove from download client) the same
+        // way an extracted-but-empty .iso does. Off = legacy behaviour where
+        // exclusion only applies to import lists, not to downloaded content.
+        bool RespectExclusionsOnImport { get; set; }
+
         bool WatchLibraryForChanges { get; set; }
         RescanAfterRefreshType RescanAfterRefresh { get; set; }
         AllowFingerprinting AllowFingerprinting { get; set; }
