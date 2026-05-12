@@ -6,6 +6,7 @@ using Lidarr.Api.V1.Tracks;
 using Lidarr.Http.REST;
 using NzbDrone.Core.DecisionEngine;
 using NzbDrone.Core.MediaFiles.TrackImport.Manual;
+using NzbDrone.Core.MediaFiles.TrackImport.Manual.Suggestions;
 using NzbDrone.Core.Parser.Model;
 using NzbDrone.Core.Qualities;
 
@@ -30,6 +31,11 @@ namespace Lidarr.Api.V1.ManualImport
         public bool AdditionalFile { get; set; }
         public bool ReplaceExistingFiles { get; set; }
         public bool DisableReleaseSwitching { get; set; }
+
+        // MusicBrainz suggestion attached when Lidarr couldn't auto-identify
+        // the file. Null when the in-library identifier matched cleanly or
+        // when no MB candidate beat the configured suggestion threshold.
+        public ImportSuggestion Suggestion { get; set; }
     }
 
     public static class ManualImportResourceMapper
@@ -62,7 +68,8 @@ namespace Lidarr.Api.V1.ManualImport
                 AudioTags = model.Tags,
                 AdditionalFile = model.AdditionalFile,
                 ReplaceExistingFiles = model.ReplaceExistingFiles,
-                DisableReleaseSwitching = model.DisableReleaseSwitching
+                DisableReleaseSwitching = model.DisableReleaseSwitching,
+                Suggestion = model.Suggestion
             };
         }
 

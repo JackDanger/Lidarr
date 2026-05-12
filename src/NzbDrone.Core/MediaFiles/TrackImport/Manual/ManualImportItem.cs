@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using NzbDrone.Core.CustomFormats;
 using NzbDrone.Core.Datastore;
 using NzbDrone.Core.DecisionEngine;
+using NzbDrone.Core.MediaFiles.TrackImport.Manual.Suggestions;
 using NzbDrone.Core.Music;
 using NzbDrone.Core.Parser.Model;
 using NzbDrone.Core.Qualities;
@@ -33,5 +34,10 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Manual
         public bool AdditionalFile { get; set; }
         public bool ReplaceExistingFiles { get; set; }
         public bool DisableReleaseSwitching { get; set; }
+
+        // Populated when Lidarr couldn't auto-identify the file and the MB
+        // lookup found a plausible match. Null otherwise — frontend hides the
+        // suggestion UI for those rows.
+        public ImportSuggestion Suggestion { get; set; }
     }
 }

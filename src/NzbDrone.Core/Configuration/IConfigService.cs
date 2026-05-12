@@ -54,6 +54,11 @@ namespace NzbDrone.Core.Configuration
         // exclusion only applies to import lists, not to downloaded content.
         bool RespectExclusionsOnImport { get; set; }
 
+        // Minimum match score [0..1] for the Manual Import modal to surface a
+        // MusicBrainz suggestion. 1.0 disables the feature; lower numbers are
+        // noisier. Tuned by the user via commits on this branch.
+        decimal ManualImportSuggestionThreshold { get; set; }
+
         bool WatchLibraryForChanges { get; set; }
         RescanAfterRefreshType RescanAfterRefresh { get; set; }
         AllowFingerprinting AllowFingerprinting { get; set; }

@@ -13,6 +13,7 @@ using NzbDrone.Core.CustomFormats;
 using NzbDrone.Core.DecisionEngine;
 using NzbDrone.Core.Download;
 using NzbDrone.Core.Download.TrackedDownloads;
+using NzbDrone.Core.MediaFiles.TrackImport.Manual.Suggestions;
 using NzbDrone.Core.Messaging.Commands;
 using NzbDrone.Core.Messaging.Events;
 using NzbDrone.Core.Music;
@@ -46,6 +47,7 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Manual
         private readonly ITrackedDownloadService _trackedDownloadService;
         private readonly IDownloadedTracksImportService _downloadedTracksImportService;
         private readonly IProvideImportItemService _provideImportItemService;
+        private readonly IImportSuggestionService _suggestionService;
         private readonly IEventAggregator _eventAggregator;
         private readonly Logger _logger;
 
@@ -64,6 +66,7 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Manual
                                    ITrackedDownloadService trackedDownloadService,
                                    IDownloadedTracksImportService downloadedTracksImportService,
                                    IProvideImportItemService provideImportItemService,
+                                   IImportSuggestionService suggestionService,
                                    IEventAggregator eventAggregator,
                                    Logger logger)
         {
@@ -82,6 +85,7 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Manual
             _trackedDownloadService = trackedDownloadService;
             _downloadedTracksImportService = downloadedTracksImportService;
             _provideImportItemService = provideImportItemService;
+            _suggestionService = suggestionService;
             _eventAggregator = eventAggregator;
             _logger = logger;
         }
@@ -219,11 +223,113 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Manual
                                             (f, d) => new { File = f, Decision = d },
                                             PathEqualityComparer.Instance);
 
-            var newItems = newFiles.Select(x => MapItem(x.Decision, downloadId, replaceExistingFiles, false));
+            var newItems = newFiles.Select(x => MapItem(x.Decision, downloadId, replaceExistingFiles, false)).ToList();
             var existingDecisions = decisions.Except(newFiles.Select(x => x.Decision));
-            var existingItems = existingDecisions.Select(x => MapItem(x, null, replaceExistingFiles, false));
+            var existingItems = existingDecisions.Select(x => MapItem(x, null, replaceExistingFiles, false)).ToList();
 
-            return newItems.Concat(existingItems).ToList();
+            var combined = newItems.Concat(existingItems).ToList();
+            AttachSuggestions(combined);
+            return combined;
+        }
+
+        // Compute one MB suggestion per (ArtistTitle, AlbumTitle) tag tuple
+        // among unmatched items and broadcast it to every item in that group.
+        // Single MB lookup per group keeps modal-open latency bounded even for
+        // boxed-set folders. Items that already matched cleanly (no rejection)
+        // are skipped — Lidarr's auto-identification got it right and there's
+        // nothing to suggest. Suggestion lookup failures are swallowed: the
+        // feature degrades to today's behaviour rather than breaking the modal.
+        private void AttachSuggestions(List<ManualImportItem> items)
+        {
+            if (items.Count == 0)
+            {
+                return;
+            }
+
+            // Build groups from the originating LocalTrack so the suggestion
+            // service can score against duration and track count too. We keep
+            // a parallel list of items per group so we can fan the result back
+            // out to each row.
+            var groups = items
+                .Where(i => i.Tags != null && i.Album == null && i.Rejections != null && i.Rejections.Any())
+                .GroupBy(i => (
+                    artist: i.Tags.ArtistTitle ?? string.Empty,
+                    album: i.Tags.AlbumTitle ?? string.Empty),
+                    StringTupleComparer);
+
+            foreach (var group in groups)
+            {
+                if (string.IsNullOrWhiteSpace(group.Key.album))
+                {
+                    continue;
+                }
+
+                var localTracks = group
+                    .Select(MakeLocalTrackForScoring)
+                    .Where(t => t != null)
+                    .ToList();
+
+                if (localTracks.Count == 0)
+                {
+                    continue;
+                }
+
+                Suggestions.ImportSuggestion suggestion;
+                try
+                {
+                    suggestion = _suggestionService.FindForTracks(localTracks);
+                }
+                catch (Exception ex)
+                {
+                    _logger.Debug(ex, "Suggestion lookup threw for '{0}' / '{1}'", group.Key.artist, group.Key.album);
+                    continue;
+                }
+
+                if (suggestion == null)
+                {
+                    continue;
+                }
+
+                foreach (var item in group)
+                {
+                    item.Suggestion = suggestion;
+                }
+            }
+        }
+
+        // We can't pass ManualImportItem to a scoring service that wants
+        // LocalTrack — build a thin one from the tags. Duration ends up as 0
+        // for items where the tag reader didn't capture it; the scorer copes.
+        private static LocalTrack MakeLocalTrackForScoring(ManualImportItem item)
+        {
+            if (item.Tags == null)
+            {
+                return null;
+            }
+
+            return new LocalTrack
+            {
+                Path = item.Path,
+                Size = item.Size,
+                FileTrackInfo = item.Tags,
+            };
+        }
+
+        private static readonly StringTupleComparerImpl StringTupleComparer = new StringTupleComparerImpl();
+
+        private sealed class StringTupleComparerImpl : IEqualityComparer<(string artist, string album)>
+        {
+            public bool Equals((string artist, string album) x, (string artist, string album) y)
+            {
+                return string.Equals(x.artist, y.artist, StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(x.album, y.album, StringComparison.OrdinalIgnoreCase);
+            }
+
+            public int GetHashCode((string artist, string album) obj)
+            {
+                return StringComparer.OrdinalIgnoreCase.GetHashCode(obj.artist ?? string.Empty)
+                    ^ StringComparer.OrdinalIgnoreCase.GetHashCode(obj.album ?? string.Empty);
+            }
         }
 
         private List<ManualImportItem> ProcessDownloadDirectory(string folder, List<IFileInfo> audioFiles)

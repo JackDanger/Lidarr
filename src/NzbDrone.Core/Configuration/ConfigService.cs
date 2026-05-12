@@ -277,6 +277,13 @@ namespace NzbDrone.Core.Configuration
             set { SetValue("RespectExclusionsOnImport", value); }
         }
 
+        public decimal ManualImportSuggestionThreshold
+        {
+            get { return GetValueDecimal("ManualImportSuggestionThreshold", 0.7m); }
+
+            set { SetValue("ManualImportSuggestionThreshold", value); }
+        }
+
         public bool WatchLibraryForChanges
         {
             get { return GetValueBoolean("WatchLibraryForChanges", true); }
@@ -503,6 +510,11 @@ namespace NzbDrone.Core.Configuration
             return Convert.ToInt32(GetValue(key, defaultValue));
         }
 
+        private decimal GetValueDecimal(string key, decimal defaultValue = 0m)
+        {
+            return Convert.ToDecimal(GetValue(key, defaultValue), System.Globalization.CultureInfo.InvariantCulture);
+        }
+
         private T GetValueEnum<T>(string key, T defaultValue)
         {
             return (T)Enum.Parse(typeof(T), GetValue(key, defaultValue), true);
@@ -538,6 +550,11 @@ namespace NzbDrone.Core.Configuration
         private void SetValue(string key, int value)
         {
             SetValue(key, value.ToString());
+        }
+
+        private void SetValue(string key, decimal value)
+        {
+            SetValue(key, value.ToString(System.Globalization.CultureInfo.InvariantCulture));
         }
 
         private void SetValue(string key, Enum value)
