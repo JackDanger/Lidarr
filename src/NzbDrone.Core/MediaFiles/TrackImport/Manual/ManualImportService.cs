@@ -246,12 +246,15 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Manual
                 return;
             }
 
-            // Build groups from the originating LocalTrack so the suggestion
-            // service can score against duration and track count too. We keep
-            // a parallel list of items per group so we can fan the result back
-            // out to each row.
+            // Trigger when ANY rejection is present — we want to surface a
+            // suggestion both for "couldn't find anything" (Album == null) and
+            // for "found something but match was way off" (Album populated,
+            // rejection from CloseAlbumMatchSpecification). The latter is the
+            // user's stated target: "if the match is way off, then we all
+            // automatically look at music brains right when the modal opens".
+            // Frontend decides how to render in each case.
             var groups = items
-                .Where(i => i.Tags != null && i.Album == null && i.Rejections != null && i.Rejections.Any())
+                .Where(i => i.Tags != null && i.Rejections != null && i.Rejections.Any())
                 .GroupBy(i => (
                     artist: i.Tags.ArtistTitle ?? string.Empty,
                     album: i.Tags.AlbumTitle ?? string.Empty),
