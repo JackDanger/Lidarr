@@ -88,6 +88,7 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Manual.Suggestions
                 return null;
             }
 
+            _logger.Debug("Suggestion: artist search '{0}' returned {1} candidates", artistTitle, artistCandidates.Count);
             if (artistCandidates.Count == 0)
             {
                 return null;
@@ -116,8 +117,15 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Manual.Suggestions
             {
                 var artistMeta = artistCandidate?.Metadata?.Value;
                 var artistMbid = artistMeta?.ForeignArtistId;
-                if (artistMbid.IsNullOrWhiteSpace() || excludedIds.Contains(artistMbid))
+                if (artistMbid.IsNullOrWhiteSpace())
                 {
+                    _logger.Debug("Suggestion: skipping candidate with no MBID ('{0}')", artistMeta?.Name);
+                    continue;
+                }
+
+                if (excludedIds.Contains(artistMbid))
+                {
+                    _logger.Debug("Suggestion: skipping excluded artist {0} '{1}'", artistMbid, artistMeta?.Name);
                     continue;
                 }
 
@@ -136,6 +144,11 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Manual.Suggestions
                 }
 
                 var albums = fullArtist?.Albums?.Value;
+                _logger.Debug(
+                    "Suggestion: artist '{0}' ({1}) has {2} albums",
+                    fullArtist?.Metadata?.Value?.Name,
+                    artistMbid,
+                    albums?.Count ?? 0);
                 if (albums == null || albums.Count == 0)
                 {
                     continue;
