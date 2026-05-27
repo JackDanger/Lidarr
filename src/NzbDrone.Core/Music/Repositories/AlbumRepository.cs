@@ -92,8 +92,8 @@ namespace NzbDrone.Core.Music
 
         // Optimized query using EXISTS instead of JOIN through all tracks.
         // The EXISTS subquery short-circuits as soon as it finds one track without a file.
-        // We check TrackFileId IS NULL directly instead of LEFT JOIN to TrackFiles,
-        // which is much faster as it avoids joining another table.
+        // "No file" means TrackFileId = 0 (the sentinel used everywhere in the codebase —
+        // see Track.HasFile and RefreshTrackService); the column is never NULL.
         private SqlBuilder AlbumsWithoutFilesBuilder(DateTime currentTime)
         {
             return Builder()
@@ -104,7 +104,7 @@ namespace NzbDrone.Core.Music
                         JOIN ""Tracks"" t ON ar.""Id"" = t.""AlbumReleaseId""
                         WHERE ar.""AlbumId"" = ""Albums"".""Id""
                           AND ar.""Monitored"" = true
-                          AND t.""TrackFileId"" IS NULL
+                          AND t.""TrackFileId"" = 0
                     )")
                     .GroupBy<Album>(x => x.Id)
                     .GroupBy<Artist>(x => x.SortName);
