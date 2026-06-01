@@ -58,6 +58,11 @@ namespace NzbDrone.Core.Jobs
         {
             var scheduledTask = _cache.Find(type.FullName);
 
+            if (scheduledTask == null)
+            {
+                return DateTime.UtcNow;
+            }
+
             return scheduledTask.LastExecution.AddMinutes(scheduledTask.Interval);
         }
 
