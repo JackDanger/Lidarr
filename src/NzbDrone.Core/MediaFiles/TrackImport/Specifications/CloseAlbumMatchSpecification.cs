@@ -39,7 +39,7 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Specifications
             {
                 dist = item.Distance.NormalizedDistance();
                 reasons = item.Distance.Reasons;
-                var albumThreshold = SelectAlbumThreshold(reasons);
+                var albumThreshold = SelectAlbumThreshold(reasons, item);
                 if (dist > albumThreshold)
                 {
                     _logger.Debug($"Album match is not close enough: {dist} vs {albumThreshold} {reasons}. Skipping {item}");
@@ -62,7 +62,7 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Specifications
                 // Only enforce the worst-track wall when we're already in strict mode
                 // (artist mismatched the candidate). There a bad track is real evidence
                 // that Lidarr picked the wrong release entirely.
-                if (ContainsArtist(reasons))
+                if (IsArtistUncertain(reasons, item))
                 {
                     var maxTrackDist = worstTrackMatch.Distance.NormalizedDistance();
                     var trackReasons = worstTrackMatch.Distance.Reasons;
@@ -80,7 +80,7 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Specifications
                 // get album distance ignoring whether tracks are missing
                 dist = item.Distance.NormalizedDistanceExcluding(new List<string> { "missing_tracks", "unmatched_tracks" });
                 reasons = item.Distance.Reasons;
-                var albumThreshold = SelectAlbumThreshold(reasons);
+                var albumThreshold = SelectAlbumThreshold(reasons, item);
                 if (dist > albumThreshold)
                 {
                     _logger.Debug($"Album match is not close enough: {dist} vs {albumThreshold} {reasons}. Skipping {item}");
@@ -92,15 +92,31 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Specifications
             return Decision.Accept();
         }
 
-        private static double SelectAlbumThreshold(string reasons)
+        private static double SelectAlbumThreshold(string reasons, LocalAlbumRelease item)
         {
-            // If "artist" appears in the distance reasons, the artist tag/folder didn't match
-            // the candidate's artist — we should not relax. Otherwise the user already had
-            // this artist; album-name fuzziness is acceptable.
-            return ContainsArtist(reasons) ? _strictAlbumThreshold : _artistKnownAlbumThreshold;
+            // Relax the album threshold unless we're genuinely unsure which artist this
+            // belongs to. See IsArtistUncertain.
+            return IsArtistUncertain(reasons, item) ? _strictAlbumThreshold : _artistKnownAlbumThreshold;
         }
+
+        // "artist" in the distance reasons means the per-file artist tag fuzzily disagreed
+        // with the candidate's canonical artist name. On its own that is a weak signal:
+        // compilations, "feat." credits, romanization/locale spellings and box-set tagging
+        // routinely trip it for releases that genuinely belong to a known artist. So we
+        // only treat the artist as *uncertain* when the tag disagrees AND the matched
+        // album's artist is not an existing library artist.
+        //
+        // When identification has mapped the release onto an artist already in the library
+        // (Id > 0) — which is the case for everything Lidarr grabbed for a monitored
+        // album — the identity is certain and the tag fuzz is noise. Relax then, per the
+        // user's "anything that improves the library" rule.
+        private static bool IsArtistUncertain(string reasons, LocalAlbumRelease item) =>
+            ContainsArtist(reasons) && !MatchedToLibraryArtist(item);
 
         private static bool ContainsArtist(string reasons) =>
             reasons != null && reasons.Contains("artist");
+
+        private static bool MatchedToLibraryArtist(LocalAlbumRelease item) =>
+            item?.AlbumRelease?.Album?.Value?.Artist?.Value?.Id > 0;
     }
 }
