@@ -447,7 +447,7 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Manual
                 return "ISO disc image — extract or mount before importing";
             }
 
-            if (_videoExtensions.Contains(ext))
+            if (FileExtensions.VideoExtensions.Contains(ext))
             {
                 return $"Video file ({ext}) — Lidarr only imports audio";
             }
@@ -461,11 +461,6 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Manual
                 ? "File has no extension — Lidarr can't determine its type"
                 : $"Unsupported file type: {ext}";
         }
-
-        private static readonly HashSet<string> _videoExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        {
-            ".mp4", ".mkv", ".avi", ".mov", ".m4v", ".webm", ".wmv", ".flv", ".mpg", ".mpeg", ".ts", ".m2ts", ".vob", ".bdmv", ".clpi", ".mpls"
-        };
 
         private static readonly HashSet<string> _metadataExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {

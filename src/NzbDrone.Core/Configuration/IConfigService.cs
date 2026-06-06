@@ -54,6 +54,11 @@ namespace NzbDrone.Core.Configuration
         // exclusion only applies to import lists, not to downloaded content.
         bool RespectExclusionsOnImport { get; set; }
 
+        // When true (default), a completed download that holds only video files
+        // (no importable audio) is terminal-failed: blocklisted, removed from the
+        // download client, and not re-grabbed. Off = park it as ImportBlocked.
+        bool DeleteVideoOnlyDownloads { get; set; }
+
         // Minimum match score [0..1] for the Manual Import modal to surface a
         // MusicBrainz suggestion. 1.0 disables the feature; lower numbers are
         // noisier. Tuned by the user via commits on this branch.

@@ -277,6 +277,18 @@ namespace NzbDrone.Core.Configuration
             set { SetValue("RespectExclusionsOnImport", value); }
         }
 
+        // When a completed download contains video files and no importable audio
+        // (a music-video / concert grab), terminal-fail it: blocklist the release,
+        // remove it from the download client (deleting the files where the client
+        // allows), and don't re-grab. Default on per the user's request to stop
+        // these clogging the queue; flip off to park them as ImportBlocked instead.
+        public bool DeleteVideoOnlyDownloads
+        {
+            get { return GetValueBoolean("DeleteVideoOnlyDownloads", true); }
+
+            set { SetValue("DeleteVideoOnlyDownloads", value); }
+        }
+
         public decimal ManualImportSuggestionThreshold
         {
             get { return GetValueDecimal("ManualImportSuggestionThreshold", 0.7m); }

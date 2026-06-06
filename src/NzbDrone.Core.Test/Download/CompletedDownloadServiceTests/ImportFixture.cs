@@ -1,9 +1,12 @@
+using System;
 using System.Collections.Generic;
+using System.IO.Abstractions;
 using FizzWare.NBuilder;
 using FluentAssertions;
 using Moq;
 using NUnit.Framework;
 using NzbDrone.Common.Disk;
+using NzbDrone.Core.Configuration;
 using NzbDrone.Core.DecisionEngine;
 using NzbDrone.Core.Download;
 using NzbDrone.Core.Download.TrackedDownloads;
@@ -388,6 +391,110 @@ namespace NzbDrone.Core.Test.Download.CompletedDownloadServiceTests
             Subject.Import(_trackedDownload);
 
             AssertImported();
+        }
+
+        private void GivenVideoOnlyDownloadOnDisk()
+        {
+            var path = _trackedDownload.DownloadItem.OutputPath.FullPath;
+
+            Mocker.GetMock<IDiskProvider>()
+                  .Setup(s => s.FileExists(path))
+                  .Returns(false);
+            Mocker.GetMock<IDiskProvider>()
+                  .Setup(s => s.FolderExists(path))
+                  .Returns(true);
+            Mocker.GetMock<IDiskProvider>()
+                  .Setup(s => s.GetFiles(path, true))
+                  .Returns(new[] { @"C:\DropFolder\MyDownload\concert.mkv".AsOsAgnostic() });
+            Mocker.GetMock<IDiskScanService>()
+                  .Setup(s => s.GetAudioFiles(path, true))
+                  .Returns(Array.Empty<IFileInfo>());
+        }
+
+        [Test]
+        public void should_mark_as_imported_when_album_already_imported()
+        {
+            GivenArtistMatch();
+
+            Mocker.GetMock<IDownloadedTracksImportService>()
+                  .Setup(v => v.ProcessPath(It.IsAny<string>(), It.IsAny<ImportMode>(), It.IsAny<Artist>(), It.IsAny<DownloadClientItem>()))
+                  .Returns(new List<ImportResult>
+                           {
+                               new ImportResult(new ImportDecision<LocalTrack>(new LocalTrack { Path = @"C:\TestPath\01.flac".AsOsAgnostic() }, new Rejection("Album already imported at 1/1/2020 12:00:00")), "Album already imported at 1/1/2020 12:00:00"),
+                               new ImportResult(new ImportDecision<LocalTrack>(new LocalTrack { Path = @"C:\TestPath\02.flac".AsOsAgnostic() }, new Rejection("Album already imported at 1/1/2020 12:00:00")), "Album already imported at 1/1/2020 12:00:00")
+                           });
+
+            Subject.Import(_trackedDownload);
+
+            // Duplicate of content we already have: clears the queue as Imported,
+            // never re-grabbed, never blocklisted.
+            _trackedDownload.State.Should().Be(TrackedDownloadState.Imported);
+            Mocker.GetMock<IFailedDownloadService>()
+                  .Verify(v => v.MarkAsFailed(It.IsAny<TrackedDownload>(), It.IsAny<bool>()), Times.Never());
+        }
+
+        [Test]
+        public void should_block_not_delete_when_destination_already_exists()
+        {
+            GivenArtistMatch();
+
+            Mocker.GetMock<IDownloadedTracksImportService>()
+                  .Setup(v => v.ProcessPath(It.IsAny<string>(), It.IsAny<ImportMode>(), It.IsAny<Artist>(), It.IsAny<DownloadClientItem>()))
+                  .Returns(new List<ImportResult>
+                           {
+                               new ImportResult(new ImportDecision<LocalTrack>(new LocalTrack { Path = @"C:\TestPath\01.flac".AsOsAgnostic() }, new Rejection("Failed to import track, Destination already exists.")), "Failed to import track, Destination already exists.")
+                           });
+
+            Subject.Import(_trackedDownload);
+
+            // Not a confirmed duplicate (could be a naming collision) — surface for
+            // review, never delete the source, never mark imported.
+            _trackedDownload.State.Should().Be(TrackedDownloadState.ImportBlocked);
+            Mocker.GetMock<IEventAggregator>()
+                  .Verify(v => v.PublishEvent(It.IsAny<DownloadCompletedEvent>()), Times.Never());
+            Mocker.GetMock<IFailedDownloadService>()
+                  .Verify(v => v.MarkAsFailed(It.IsAny<TrackedDownload>(), It.IsAny<bool>()), Times.Never());
+        }
+
+        [Test]
+        public void should_fail_and_remove_video_only_download_when_enabled()
+        {
+            GivenArtistMatch();
+            GivenVideoOnlyDownloadOnDisk();
+
+            Mocker.GetMock<IConfigService>()
+                  .SetupGet(s => s.DeleteVideoOnlyDownloads)
+                  .Returns(true);
+
+            Mocker.GetMock<IDownloadedTracksImportService>()
+                  .Setup(v => v.ProcessPath(It.IsAny<string>(), It.IsAny<ImportMode>(), It.IsAny<Artist>(), It.IsAny<DownloadClientItem>()))
+                  .Returns(new List<ImportResult>());
+
+            Subject.Import(_trackedDownload);
+
+            Mocker.GetMock<IFailedDownloadService>()
+                  .Verify(v => v.MarkAsFailed(_trackedDownload, true), Times.Once());
+        }
+
+        [Test]
+        public void should_block_video_only_download_when_disabled()
+        {
+            GivenArtistMatch();
+            GivenVideoOnlyDownloadOnDisk();
+
+            Mocker.GetMock<IConfigService>()
+                  .SetupGet(s => s.DeleteVideoOnlyDownloads)
+                  .Returns(false);
+
+            Mocker.GetMock<IDownloadedTracksImportService>()
+                  .Setup(v => v.ProcessPath(It.IsAny<string>(), It.IsAny<ImportMode>(), It.IsAny<Artist>(), It.IsAny<DownloadClientItem>()))
+                  .Returns(new List<ImportResult>());
+
+            Subject.Import(_trackedDownload);
+
+            _trackedDownload.State.Should().Be(TrackedDownloadState.ImportBlocked);
+            Mocker.GetMock<IFailedDownloadService>()
+                  .Verify(v => v.MarkAsFailed(It.IsAny<TrackedDownload>(), It.IsAny<bool>()), Times.Never());
         }
 
         private void AssertNotImported()

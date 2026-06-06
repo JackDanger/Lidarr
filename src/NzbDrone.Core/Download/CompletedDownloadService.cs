@@ -264,6 +264,26 @@ namespace NzbDrone.Core.Download
                     return;
                 }
 
+                // Music-video / concert grab: video files present, zero importable
+                // audio. Lidarr can't use it. Terminal-fail it (blocklist + remove from
+                // client + don't re-grab) so it stops clogging the queue, unless the
+                // user has opted out (then it parks as ImportBlocked like before).
+                if (IsVideoOnlyDownload(outputPath))
+                {
+                    if (_configService.DeleteVideoOnlyDownloads)
+                    {
+                        _logger.Warn(
+                            "Download {0} contains video files but no audio — Lidarr only imports audio. Marking failed, blocklisting, and removing from the download client.",
+                            trackedDownload.DownloadItem.Title);
+                        _failedDownloadService.MarkAsFailed(trackedDownload, skipRedownload: true);
+                        return;
+                    }
+
+                    trackedDownload.Warn("Download contains video files but no audio; Lidarr only imports audio.");
+                    SetStateToImportBlocked(trackedDownload);
+                    return;
+                }
+
                 trackedDownload.Warn("No files found are eligible for import in {0}", outputPath);
                 SetStateToImportBlocked(trackedDownload);
                 return;
@@ -277,6 +297,18 @@ namespace NzbDrone.Core.Download
                 var only = importResults[0];
                 if (only.Result == ImportResultType.Rejected && only.ImportDecision.Item == null)
                 {
+                    // A lone unimportable file that's actually a video (e.g. a single
+                    // ".mkv" music video) gets the same terminal-fail treatment as the
+                    // folder case above, when enabled.
+                    if (_configService.DeleteVideoOnlyDownloads && IsVideoOnlyDownload(outputPath))
+                    {
+                        _logger.Warn(
+                            "Download {0} is a single video file with no audio — Lidarr only imports audio. Marking failed, blocklisting, and removing from the download client.",
+                            trackedDownload.DownloadItem.Title);
+                        _failedDownloadService.MarkAsFailed(trackedDownload, skipRedownload: true);
+                        return;
+                    }
+
                     var error = only.Errors.FirstOrDefault() ?? "Could not parse file for import";
                     trackedDownload.Warn(new TrackedDownloadStatusMessage(error, new List<string>()));
                     SetStateToImportBlocked(trackedDownload);
@@ -370,13 +402,36 @@ namespace NzbDrone.Core.Download
             "All matched tracks already in library",
             "Has fewer tracks than existing release",
             "Not an upgrade for existing album file",
-            "Not an upgrade for existing track file"
+            "Not an upgrade for existing track file",
+
+            // Album-level rejection from AlreadyImportedSpecification: download history
+            // shows we already imported this exact download. The bits are redundant —
+            // treat as Imported so the queue clears and the client cleans up the source.
+            "Album already imported at"
         };
 
         private static readonly string[] _unfindableInMetadataPrefixes =
         {
             "Couldn't find similar album for",
             "No tracks could be matched to a release"
+        };
+
+        // Rejections that mean "this download is done with as far as auto-import is
+        // concerned, but we must NOT delete or claim we imported it" — park as
+        // ImportBlocked (terminal-but-visible) instead. Distinct from the
+        // already-have bucket because the cause is not a confirmed duplicate:
+        //
+        //   "Failed to import track, Destination already exists." is thrown at the
+        //   file-move stage, not by the decision engine. It usually means a true
+        //   duplicate, but it can also be a naming-token collision between two
+        //   genuinely different tracks/releases, or a stale orphan file at the
+        //   destination with no TrackFile row. Marking it Imported + removing the
+        //   source would silently discard a real download in those cases, so we
+        //   surface it for the user rather than guess. Also listed in
+        //   _persistentImportFailurePrefixes so Check doesn't bounce it every refresh.
+        private static readonly string[] _blockedNeedsReviewPrefixes =
+        {
+            "Failed to import track, Destination already exists"
         };
 
         // Reasons set by ClassifyAndSetState (V3 / V5) and CheckEmptyResultForIssue
@@ -395,7 +450,8 @@ namespace NzbDrone.Core.Download
             "Invalid audio file, unsupported extension",    // single-file unknown ext
             "Unable to parse download, automatic import is not possible",
             "Artist name mismatch",                          // user-fixable but folder content didn't change
-            "Download wasn't grabbed by Lidarr"
+            "Download wasn't grabbed by Lidarr",
+            "Failed to import track, Destination already exists" // collision parked as ImportBlocked, don't re-run
         };
 
         private static bool MatchesAnyPrefix(string error, string[] prefixes)
@@ -481,6 +537,7 @@ namespace NzbDrone.Core.Download
                     }
 
                     if (MatchesAnyPrefix(entry, _unfindableInMetadataPrefixes) ||
+                        MatchesAnyPrefix(entry, _blockedNeedsReviewPrefixes) ||
                         MatchesAnyPrefix(entry, _persistentImportFailurePrefixes))
                     {
                         hasBlocker = true;
@@ -511,6 +568,7 @@ namespace NzbDrone.Core.Download
             }
 
             var hasUnfindable = false;
+            var needsReview = false;
 
             foreach (var result in nonImported)
             {
@@ -532,9 +590,34 @@ namespace NzbDrone.Core.Download
                         continue;
                     }
 
+                    if (MatchesAnyPrefix(error, _blockedNeedsReviewPrefixes))
+                    {
+                        needsReview = true;
+                        continue;
+                    }
+
                     // Some other rejection — leave for retry under existing flow.
                     return false;
                 }
+            }
+
+            // Destination-collision (and friends): park as ImportBlocked so the user
+            // can see it, but never delete the source or record a false import. We
+            // don't orphan-import these — the files DID match an album, the move just
+            // collided, so .unmatched/ is the wrong home. ImportBlocked wins over the
+            // unfindable/orphan path when both are present in a mixed download.
+            if (needsReview)
+            {
+                _logger.Info("Download '{0}' hit a destination collision / needs-review rejection; marking ImportBlocked (no delete, no re-grab).", trackedDownload.DownloadItem.Title);
+
+                var reviewMessages = BuildPerFileStatusMessages(nonImported);
+                if (reviewMessages.Count > 0)
+                {
+                    trackedDownload.Warn(reviewMessages.ToArray());
+                }
+
+                SetStateToImportBlocked(trackedDownload);
+                return true;
             }
 
             if (hasUnfindable)
@@ -684,6 +767,40 @@ namespace NzbDrone.Core.Download
             }
 
             return !_diskScanService.GetAudioFiles(outputPath).Any();
+        }
+
+        // True iff the download is a music-video / concert grab: at least one video
+        // file present and ZERO importable audio. "No audio" is decided by the
+        // authoritative disk scan (the same GetAudioFiles HasExtractedNoAudio and
+        // TryOrphanImport use), never by the absence of import results — so a folder
+        // that holds real music plus a bonus video never qualifies, even if those
+        // tracks failed to import for an unrelated reason. This is the guard that
+        // keeps the blocklist+delete action from ever touching real music.
+        private bool IsVideoOnlyDownload(string outputPath)
+        {
+            if (string.IsNullOrWhiteSpace(outputPath))
+            {
+                return false;
+            }
+
+            // Single-file download whose path is the file itself.
+            if (_diskProvider.FileExists(outputPath))
+            {
+                return FileExtensions.VideoExtensions.Contains(Path.GetExtension(outputPath));
+            }
+
+            if (!_diskProvider.FolderExists(outputPath))
+            {
+                return false;
+            }
+
+            if (_diskScanService.GetAudioFiles(outputPath).Any())
+            {
+                return false;
+            }
+
+            return _diskProvider.GetFiles(outputPath, true)
+                .Any(f => FileExtensions.VideoExtensions.Contains(Path.GetExtension(f)));
         }
 
         private bool TryOrphanImport(TrackedDownload trackedDownload, List<ImportResult> nonImported, string outputPath)
