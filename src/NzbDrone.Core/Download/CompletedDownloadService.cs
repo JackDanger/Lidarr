@@ -434,6 +434,24 @@ namespace NzbDrone.Core.Download
             "Failed to import track, Destination already exists"
         };
 
+        // Rejections where the specific RELEASE (not the album) is unimportable and
+        // re-grabbing the identical release will always fail the same way: unparseable
+        // files, wrong artist, or a match too weak to trust. Blocklist the release
+        // (MarkAsFailed, skipRedownload) so the missing-album search can never
+        // re-download this exact one — the album stays wanted, so a DIFFERENT release
+        // is tried next. This is the "fetch each release at most once" guarantee, and it
+        // deliberately overrides the older "keep score-thresholds retryable" behaviour:
+        // a retry here means a re-grab, which is the duplicate-download problem itself.
+        private static readonly string[] _blocklistUnimportableReleasePrefixes =
+        {
+            "Album match is not close enough",
+            "Couldn't parse track from",
+            "Could not parse file for import",
+            "Unable to parse download, automatic import is not possible",
+            "Invalid audio file, unsupported extension",
+            "Artist name mismatch"
+        };
+
         // Reasons set by ClassifyAndSetState (V3 / V5) and CheckEmptyResultForIssue
         // that mean re-running Import on the same folder won't change the outcome.
         // Recognised in addition to _unfindableInMetadataPrefixes by Check's
@@ -569,6 +587,7 @@ namespace NzbDrone.Core.Download
 
             var hasUnfindable = false;
             var needsReview = false;
+            var mustBlocklist = false;
 
             foreach (var result in nonImported)
             {
@@ -596,6 +615,12 @@ namespace NzbDrone.Core.Download
                         continue;
                     }
 
+                    if (MatchesAnyPrefix(error, _blocklistUnimportableReleasePrefixes))
+                    {
+                        mustBlocklist = true;
+                        continue;
+                    }
+
                     // Some other rejection — leave for retry under existing flow.
                     return false;
                 }
@@ -620,28 +645,29 @@ namespace NzbDrone.Core.Download
                 return true;
             }
 
-            if (hasUnfindable)
+            if (hasUnfindable || mustBlocklist)
             {
-                // Before resigning to ImportBlocked, try to file the audio into the
-                // artist's .unmatched/ folder so the bits aren't lost. Matches the
-                // user's stated import philosophy: "if a download adds tracks the
-                // library doesn't have, import it." See TryOrphanImport.
-                if (TryOrphanImport(trackedDownload, nonImported, outputPath))
+                // For unfindable audio, first file the bits into the artist's
+                // .unmatched/ folder so a genuine download isn't lost (parse-garbage from
+                // the blocklist bucket has nothing worth saving). Then, either way,
+                // blocklist the release so the missing-album search can never re-download
+                // this exact one — the album stays wanted, so a DIFFERENT release is tried
+                // next. This is what stops the "grab -> fail -> grab the same release again"
+                // loop that was hammering the indexer.
+                if (hasUnfindable)
                 {
-                    return true;
+                    TryOrphanImport(trackedDownload, nonImported, outputPath);
                 }
 
-                _logger.Info("Download '{0}' has files Lidarr couldn't match in MusicBrainz; marking as ImportBlocked (manual import or MB metadata needed).", trackedDownload.DownloadItem.Title);
+                _logger.Info("Download '{0}' can't be imported (unparseable or unmatchable release); blocklisting it so it isn't re-grabbed. The album stays wanted for a different release.", trackedDownload.DownloadItem.Title);
 
-                // Surface the per-file detail so the user can see exactly which
-                // subfolders / files Lidarr couldn't match, then go terminal.
                 var perFile = BuildPerFileStatusMessages(nonImported);
                 if (perFile.Count > 0)
                 {
                     trackedDownload.Warn(perFile.ToArray());
                 }
 
-                SetStateToImportBlocked(trackedDownload);
+                _failedDownloadService.MarkAsFailed(trackedDownload, skipRedownload: true);
                 return true;
             }
 
