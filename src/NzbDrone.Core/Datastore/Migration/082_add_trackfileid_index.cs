@@ -3,7 +3,7 @@ using NzbDrone.Core.Datastore.Migration.Framework;
 
 namespace NzbDrone.Core.Datastore.Migration
 {
-    [Migration(081)]
+    [Migration(082)]
     public class add_trackfileid_index : NzbDroneMigrationBase
     {
         protected override void MainDbUpgrade()
