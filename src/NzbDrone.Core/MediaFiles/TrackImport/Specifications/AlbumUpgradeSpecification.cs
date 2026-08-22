@@ -39,13 +39,8 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Specifications
                     _logger.Debug("Min quality of existing files: {0}", existingMinQuality);
                     if (qualityComparer.Compare(existingMinQuality, newMinQuality) > 0)
                     {
-                        // Generous import: this used to reject the whole album because it
-                        // isn't a blanket quality upgrade — the "one track already exists at
-                        // higher quality, so skip the entire album" case. We now accept it so
-                        // the tracks we don't yet have get imported; the track-level
-                        // UpgradeSpecification still refuses to overwrite any existing better
-                        // file, so nothing good is lost.
-                        _logger.Debug("Generous import: album isn't a blanket quality upgrade over {0}; importing anyway (per-track overwrites still guarded). {1}", currentRelease, item);
+                        _logger.Debug("This album isn't a quality upgrade for all tracks. Skipping {0}", item);
+                        return Decision.Reject("Not an upgrade for existing album file(s)");
                     }
                 }
             }
