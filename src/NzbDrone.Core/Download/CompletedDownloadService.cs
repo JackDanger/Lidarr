@@ -671,14 +671,20 @@ namespace NzbDrone.Core.Download
                 return true;
             }
 
-            _logger.Info("Download '{0}' content already in library; marking as Imported (no upgrades available).", trackedDownload.DownloadItem.Title);
-            trackedDownload.State = TrackedDownloadState.Imported;
+            // Nothing in this release improved the library, yet the album may still be
+            // wanted (partial/incomplete). Marking it Imported alone lets the next missing
+            // search grab this exact release again — observed as 3-4 grabs/hour of one NZB
+            // until the indexer complained. Blocklist it (skipRedownload keeps the album
+            // wanted for a DIFFERENT release), the same way unmatchable releases are handled.
+            _logger.Info("Download '{0}' content already in library (no upgrades available); blocklisting it so the still-wanted album doesn't re-grab the same release.", trackedDownload.DownloadItem.Title);
 
-            if (trackedDownload.RemoteAlbum?.Artist != null)
+            var alreadyHaveMessages = BuildPerFileStatusMessages(nonImported);
+            if (alreadyHaveMessages.Count > 0)
             {
-                _eventAggregator.PublishEvent(new DownloadCompletedEvent(trackedDownload, trackedDownload.RemoteAlbum.Artist.Id));
+                trackedDownload.Warn(alreadyHaveMessages.ToArray());
             }
 
+            _failedDownloadService.MarkAsFailed(trackedDownload, skipRedownload: true);
             return true;
         }
 

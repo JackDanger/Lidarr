@@ -94,9 +94,17 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Specifications
 
         private static double SelectAlbumThreshold(string reasons, LocalAlbumRelease item)
         {
-            // Relax the album threshold unless we're genuinely unsure which artist this
-            // belongs to. See IsArtistUncertain.
-            return IsArtistUncertain(reasons, item) ? _strictAlbumThreshold : _artistKnownAlbumThreshold;
+            // Relax the album threshold only when both the artist is certain AND the album
+            // title agreed. A title penalty means the files are tagged as a *different*
+            // album by this artist (a single/EP/remix release vs the wanted LP); importing
+            // it "generously" overwrote real tracks of the wanted album and then re-grabbed
+            // the same release forever because the album stayed incomplete.
+            if (IsArtistUncertain(reasons, item) || HasReason(reasons, "album"))
+            {
+                return _strictAlbumThreshold;
+            }
+
+            return _artistKnownAlbumThreshold;
         }
 
         // "artist" in the distance reasons means the per-file artist tag fuzzily disagreed
@@ -114,7 +122,11 @@ namespace NzbDrone.Core.MediaFiles.TrackImport.Specifications
             ContainsArtist(reasons) && !MatchedToLibraryArtist(item);
 
         private static bool ContainsArtist(string reasons) =>
-            reasons != null && reasons.Contains("artist");
+            HasReason(reasons, "artist");
+
+        private static bool HasReason(string reasons, string reason) =>
+            reasons != null &&
+            reasons.Trim('[', ']').Split(',').Select(r => r.Trim()).Contains(reason);
 
         private static bool MatchedToLibraryArtist(LocalAlbumRelease item) =>
             item?.AlbumRelease?.Album?.Value?.Artist?.Value?.Id > 0;
