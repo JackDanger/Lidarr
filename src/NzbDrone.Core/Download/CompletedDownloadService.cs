@@ -7,6 +7,7 @@ using NzbDrone.Common.Disk;
 using NzbDrone.Common.EnvironmentInfo;
 using NzbDrone.Common.Extensions;
 using NzbDrone.Common.Instrumentation.Extensions;
+using NzbDrone.Core.Blocklisting;
 using NzbDrone.Core.Configuration;
 using NzbDrone.Core.Download.TrackedDownloads;
 using NzbDrone.Core.History;
@@ -43,6 +44,7 @@ namespace NzbDrone.Core.Download
         private readonly IConfigService _configService;
         private readonly IFailedDownloadService _failedDownloadService;
         private readonly IImportListExclusionService _exclusionService;
+        private readonly IBlocklistService _blocklistService;
         private readonly Logger _logger;
 
         public CompletedDownloadService(IEventAggregator eventAggregator,
@@ -58,6 +60,7 @@ namespace NzbDrone.Core.Download
                                         IConfigService configService,
                                         IFailedDownloadService failedDownloadService,
                                         IImportListExclusionService exclusionService,
+                                        IBlocklistService blocklistService,
                                         Logger logger)
         {
             _eventAggregator = eventAggregator;
@@ -73,6 +76,7 @@ namespace NzbDrone.Core.Download
             _configService = configService;
             _failedDownloadService = failedDownloadService;
             _exclusionService = exclusionService;
+            _blocklistService = blocklistService;
             _logger = logger;
         }
 
@@ -676,16 +680,39 @@ namespace NzbDrone.Core.Download
             // search grab this exact release again — observed as 3-4 grabs/hour of one NZB
             // until the indexer complained. Blocklist it (skipRedownload keeps the album
             // wanted for a DIFFERENT release), the same way unmatchable releases are handled.
-            _logger.Info("Download '{0}' content already in library (no upgrades available); blocklisting it so the still-wanted album doesn't re-grab the same release.", trackedDownload.DownloadItem.Title);
+            // Nothing in this release improved the library, yet the album may still be
+            // wanted (partial/incomplete). Marking it Imported alone lets the next missing
+            // search grab this exact release again — observed as 3-4 grabs/hour of one NZB
+            // until the indexer complained. Blocklist it directly (the album stays wanted
+            // for a DIFFERENT release) but keep the Imported state: MarkAsFailed would
+            // re-fire on every refresh for a torrent still seeding in the client.
+            _logger.Info("Download '{0}' content already in library; marking as Imported and blocklisting it so the still-wanted album doesn't re-grab the same release.", trackedDownload.DownloadItem.Title);
+            trackedDownload.State = TrackedDownloadState.Imported;
 
-            var alreadyHaveMessages = BuildPerFileStatusMessages(nonImported);
-            if (alreadyHaveMessages.Count > 0)
+            BlocklistIfGrabbedByLidarr(trackedDownload, "Import added nothing new to the library");
+
+            if (trackedDownload.RemoteAlbum?.Artist != null)
             {
-                trackedDownload.Warn(alreadyHaveMessages.ToArray());
+                _eventAggregator.PublishEvent(new DownloadCompletedEvent(trackedDownload, trackedDownload.RemoteAlbum.Artist.Id));
             }
 
-            _failedDownloadService.MarkAsFailed(trackedDownload, skipRedownload: true);
             return true;
+        }
+
+        private void BlocklistIfGrabbedByLidarr(TrackedDownload trackedDownload, string message)
+        {
+            var remoteAlbum = trackedDownload.RemoteAlbum;
+            if (remoteAlbum?.Artist == null || remoteAlbum.Release == null || remoteAlbum.ParsedAlbumInfo == null || remoteAlbum.Albums == null)
+            {
+                return;
+            }
+
+            if (_blocklistService.Blocklisted(remoteAlbum.Artist.Id, remoteAlbum.Release))
+            {
+                return;
+            }
+
+            _blocklistService.Block(remoteAlbum, message);
         }
 
         // Move audio files Lidarr couldn't match in MB into the artist's library
