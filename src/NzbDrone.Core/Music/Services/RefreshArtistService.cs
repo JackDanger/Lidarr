@@ -36,7 +36,6 @@ namespace NzbDrone.Core.Music
         private readonly IManageCommandQueue _commandQueueManager;
         private readonly IMediaFileService _mediaFileService;
         private readonly IHistoryService _historyService;
-        private readonly IRootFolderService _rootFolderService;
         private readonly ICheckIfArtistShouldBeRefreshed _checkIfArtistShouldBeRefreshed;
         private readonly IMonitorNewAlbumService _monitorNewAlbumService;
         private readonly IConfigService _configService;
@@ -53,7 +52,6 @@ namespace NzbDrone.Core.Music
                                     IManageCommandQueue commandQueueManager,
                                     IMediaFileService mediaFileService,
                                     IHistoryService historyService,
-                                    IRootFolderService rootFolderService,
                                     ICheckIfArtistShouldBeRefreshed checkIfArtistShouldBeRefreshed,
                                     IMonitorNewAlbumService monitorNewAlbumService,
                                     IConfigService configService,
@@ -70,7 +68,6 @@ namespace NzbDrone.Core.Music
             _commandQueueManager = commandQueueManager;
             _mediaFileService = mediaFileService;
             _historyService = historyService;
-            _rootFolderService = rootFolderService;
             _checkIfArtistShouldBeRefreshed = checkIfArtistShouldBeRefreshed;
             _monitorNewAlbumService = monitorNewAlbumService;
             _configService = configService;
@@ -302,16 +299,18 @@ namespace NzbDrone.Core.Music
             var rescanAfterRefresh = _configService.RescanAfterRefresh;
             var shouldRescan = true;
             var filter = FilterFilesType.Matched;
-            var folders = _rootFolderService.All().Select(x => x.Path).ToList();
+
+            // Always scope the rescan to the refreshed artists' folders. Upstream scans
+            // every root folder here, which on a multi-TB library is a scan that never
+            // finishes: each RefreshArtist stacked another whole-root RescanFolders,
+            // and files sitting in an artist folder stayed unknown to the DB (album
+            // "wanted", re-grabbed) while those root scans ran for hours.
+            var folders = artists.Select(x => x.Path).ToList();
 
             if (isNew)
             {
                 _logger.Trace("Forcing rescan. Reason: New artist added");
                 shouldRescan = true;
-
-                // only rescan artist folders - otherwise it can be super slow for
-                // badly organized / partly matched libraries
-                folders = artists.Select(x => x.Path).ToList();
             }
             else if (rescanAfterRefresh == RescanAfterRefreshType.Never)
             {
