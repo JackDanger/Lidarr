@@ -20,7 +20,6 @@ using NzbDrone.Core.Messaging.Events;
 using NzbDrone.Core.MetadataSource;
 using NzbDrone.Core.Music.Commands;
 using NzbDrone.Core.Music.Events;
-using NzbDrone.Core.RootFolders;
 
 namespace NzbDrone.Core.Music
 {
