@@ -6,7 +6,6 @@ using NLog;
 using NzbDrone.Core.Download;
 using NzbDrone.Core.Download.TrackedDownloads;
 using NzbDrone.Core.Lifecycle;
-using NzbDrone.Core.MediaFiles.Commands;
 using NzbDrone.Core.MediaFiles.TrackImport.Manual;
 using NzbDrone.Core.Messaging.Commands;
 using NzbDrone.Core.Messaging.Events;
@@ -82,9 +81,9 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
                 }
             }
 
-            // Trigger root folder scan to catch any files that haven't been processed yet
-            _logger.Info("Triggering root folder scan to identify any unmatched files with improved logic.");
-            _commandQueueManager.Push(new RescanFoldersCommand(), CommandPriority.High);
+            // No whole-root RescanFolders here: on a multi-TB library that scan runs for
+            // hours after every restart and delays everything queued behind it. Refreshes
+            // rescan the artist's own folder; anything else is a manual per-folder scan.
 
             // Also trigger refresh of monitored downloads to re-import failed items with improved logic
             _logger.Info("Triggering refresh of monitored downloads to retry failed imports with improved matching.");

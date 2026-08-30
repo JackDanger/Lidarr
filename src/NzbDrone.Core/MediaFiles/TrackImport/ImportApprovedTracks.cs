@@ -117,13 +117,23 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
                     continue;
                 }
 
-                if (replaceExisting)
+                var newRelease = albumDecision.First().Item.Release;
+
+                // Wiping every existing file is only safe when the incoming release covers
+                // the whole album. A partial release (accepted by the relaxed import specs)
+                // must not delete tracks it cannot replace: a 22-of-67 box-set retry once
+                // recycled all 45 existing files and then imported nothing. Partial imports
+                // rely on the per-track upgrade path further down instead.
+                if (replaceExisting && CoversWholeRelease(decisionList, newRelease))
                 {
                     RemoveExistingTrackFiles(artist, album);
                 }
+                else if (replaceExisting)
+                {
+                    _logger.Debug("Release {0} covers {1}/{2} tracks; keeping existing files that aren't being replaced", newRelease, decisionList.SelectMany(d => d.Item.Tracks).Select(t => t.Id).Distinct().Count(), newRelease.TrackCount);
+                }
 
                 // set the correct release to be monitored before importing the new files
-                var newRelease = albumDecision.First().Item.Release;
                 _logger.Debug("Updating release to {0} [{1} tracks]", newRelease, newRelease.TrackCount);
                 album.AlbumReleases = _releaseService.SetMonitored(newRelease);
 
@@ -472,6 +482,17 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
             {
                 decision.Reject(new Rejection("Failed to add missing album", RejectionType.Temporary));
             }
+        }
+
+        private static bool CoversWholeRelease(List<ImportDecision<LocalTrack>> decisionList, AlbumRelease release)
+        {
+            var importedTrackIds = decisionList
+                .Where(d => d.Approved)
+                .SelectMany(d => d.Item.Tracks)
+                .Select(t => t.Id)
+                .ToHashSet();
+
+            return release.Tracks.Value.All(t => importedTrackIds.Contains(t.Id));
         }
 
         private void RemoveExistingTrackFiles(Artist artist, Album album)
