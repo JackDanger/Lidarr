@@ -126,16 +126,19 @@ namespace NzbDrone.Core.MediaFiles
 
         public List<TrackFile> GetFileWithPath(List<string> paths)
         {
-            // use more limited join for speed
+            if (paths.Count == 0)
+            {
+                return new List<TrackFile>();
+            }
+
             var builder = new SqlBuilder(_database.DatabaseType)
-                .LeftJoin<TrackFile, Track>((f, t) => f.Id == t.TrackFileId);
+                .LeftJoin<TrackFile, Track>((f, t) => f.Id == t.TrackFileId)
+                .Where<TrackFile>(f => paths.Contains(f.Path));
 
             var dict = new Dictionary<int, TrackFile>();
             _ = _database.QueryJoined<TrackFile, Track>(builder, (file, track) => MapTrack(dict, file, track)).ToList();
-            var all = dict.Values.ToList();
 
-            var joined = all.Join(paths, x => x.Path, x => x, (file, path) => file, PathEqualityComparer.Instance).ToList();
-            return joined;
+            return dict.Values.Join(paths, x => x.Path, x => x, (file, path) => file, PathEqualityComparer.Instance).ToList();
         }
 
         private TrackFile MapTrack(Dictionary<int, TrackFile> dict, TrackFile file, Track track)
