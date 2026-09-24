@@ -43,12 +43,9 @@ namespace NzbDrone.Core.ArtistStats
 
         private List<AlbumStatistics> MapResults(List<AlbumStatistics> tracksResult, List<AlbumStatistics> filesResult)
         {
-            tracksResult.ForEach(e =>
-            {
-                var file = filesResult.SingleOrDefault(f => f.ArtistId == e.ArtistId & f.AlbumId == e.AlbumId);
+            var sizeByAlbum = filesResult.ToDictionary(f => (f.ArtistId, f.AlbumId), f => f.SizeOnDisk);
 
-                e.SizeOnDisk = file?.SizeOnDisk ?? 0;
-            });
+            tracksResult.ForEach(e => e.SizeOnDisk = sizeByAlbum.GetValueOrDefault((e.ArtistId, e.AlbumId)));
 
             return tracksResult;
         }

@@ -72,8 +72,15 @@ namespace Lidarr.Api.V1.Albums
                 }
             }
 
-            var artistStats = _artistStatisticsService.ArtistStatistics();
-            LinkArtistStatistics(result, artistStats);
+            if (result.Count > 0)
+            {
+                var artistIds = result.Select(x => x.ArtistId).Distinct().ToList();
+                var artistStats = artistIds.Count == 1
+                    ? new List<ArtistStatistics> { _artistStatisticsService.ArtistStatistics(artistIds[0]) }
+                    : _artistStatisticsService.ArtistStatistics();
+                LinkArtistStatistics(result, artistStats);
+            }
+
             MapCoversToLocal(result.ToArray());
 
             return result;
