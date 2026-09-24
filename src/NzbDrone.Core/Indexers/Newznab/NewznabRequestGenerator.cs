@@ -123,6 +123,8 @@ namespace NzbDrone.Core.Indexers.Newznab
                     Settings.Categories,
                     "search",
                     $"&q={NewsnabifyTitle(searchQuery)}"));
+
+                AddApostropheFreeFallback(pageableRequests, searchQuery);
             }
 
             return pageableRequests;
@@ -150,6 +152,8 @@ namespace NzbDrone.Core.Indexers.Newznab
                         Settings.Categories,
                         "search",
                         $"&q={NewsnabifyTitle(queryTitle)}"));
+
+                AddApostropheFreeFallback(pageableRequests, queryTitle);
             }
 
             return pageableRequests;
@@ -160,6 +164,22 @@ namespace NzbDrone.Core.Indexers.Newznab
             chain.AddTier();
 
             chain.Add(GetPagedRequests(MaxPages, Settings.Categories, "music", $"&q={parameters}"));
+        }
+
+        private void AddApostropheFreeFallback(IndexerPageableRequestChain chain, string searchQuery)
+        {
+            var strippedQuery = searchQuery.Replace("'", string.Empty).Replace("’", string.Empty);
+
+            if (strippedQuery == searchQuery)
+            {
+                return;
+            }
+
+            chain.AddTier();
+            chain.Add(GetPagedRequests(MaxPages,
+                Settings.Categories,
+                "search",
+                $"&q={NewsnabifyTitle(strippedQuery)}"));
         }
 
         private IEnumerable<IndexerRequest> GetPagedRequests(int maxPages, IEnumerable<int> categories, string searchType, string parameters)
