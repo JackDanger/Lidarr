@@ -74,3 +74,14 @@ The single-assignment state machine and its history live in
   the self-hosted LMD metadata mirror.
 - `/root/lidarr_build.sh`, `/root/lidarr-loop-guard.sh` on LXC 163, and the
   operational lore in the bixby repo's `data/homelab.md` § Music automation.
+
+## Test debt
+
+`.github/workflows/wip-ci.yml` runs the core unit suite on every `jackdanger/wip`
+push. Sixteen upstream tests assert pre-fork behavior (import move/copy
+semantics, tracked-download source-title matching, delete-once bookkeeping,
+one config round-trip) and are excluded by name in the workflow's
+`FORK_DRIFT_FILTER`. Each exclusion is debt: the right fix is updating the
+test to assert the fork's invariant and removing it from the filter. Never
+grow the filter without an entry here explaining which fork behavior the
+test collides with.
