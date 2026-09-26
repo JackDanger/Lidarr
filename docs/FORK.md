@@ -84,7 +84,8 @@ one config round-trip) and are excluded by name in the workflow's
 `FORK_DRIFT_FILTER`. Each exclusion is debt: the right fix is updating the
 test to assert the fork's invariant and removing it from the filter. Never
 grow the filter without an entry here explaining which fork behavior the
-test collides with. `should_parse_artist_name_and_album_title` is excluded
+test collides with. `should_parse_artist_name_and_album_title` and
+`should_parse_year_or_year_range_from_discography` are excluded
 wholesale — only its eight Discography-release cases drifted (the fork
 changed discography handling), but a name filter cannot split a
 parameterized test, so its healthy cases lost CI coverage too; restoring

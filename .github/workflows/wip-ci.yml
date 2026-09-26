@@ -27,7 +27,8 @@ env:
     Name!=should_track_downloads_using_the_source_title_if_it_cannot_be_found_using_the_download_title&
     Name!=should_use_override_importmode&
     Name!=should_use_parsed_artist_title&
-    Name!=should_parse_artist_name_and_album_title
+    Name!=should_parse_artist_name_and_album_title&
+    Name!=should_parse_year_or_year_range_from_discography
 
 jobs:
   backend:
