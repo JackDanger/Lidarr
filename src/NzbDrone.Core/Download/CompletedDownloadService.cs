@@ -41,6 +41,7 @@ namespace NzbDrone.Core.Download
         private readonly IExtractionService _extractionService;
         private readonly IDiskProvider _diskProvider;
         private readonly IDiskScanService _diskScanService;
+        private readonly IMediaFileService _mediaFileService;
         private readonly IConfigService _configService;
         private readonly IFailedDownloadService _failedDownloadService;
         private readonly IImportListExclusionService _exclusionService;
@@ -57,6 +58,7 @@ namespace NzbDrone.Core.Download
                                         IExtractionService extractionService,
                                         IDiskProvider diskProvider,
                                         IDiskScanService diskScanService,
+                                        IMediaFileService mediaFileService,
                                         IConfigService configService,
                                         IFailedDownloadService failedDownloadService,
                                         IImportListExclusionService exclusionService,
@@ -73,6 +75,7 @@ namespace NzbDrone.Core.Download
             _extractionService = extractionService;
             _diskProvider = diskProvider;
             _diskScanService = diskScanService;
+            _mediaFileService = mediaFileService;
             _configService = configService;
             _failedDownloadService = failedDownloadService;
             _exclusionService = exclusionService;
@@ -637,6 +640,11 @@ namespace NzbDrone.Core.Download
             // unfindable/orphan path when both are present in a mixed download.
             if (needsReview)
             {
+                if (TryAdoptCollidedDestinationFiles(trackedDownload, nonImported))
+                {
+                    return true;
+                }
+
                 _logger.Info("Download '{0}' hit a destination collision / needs-review rejection; marking ImportBlocked (no delete, no re-grab).", trackedDownload.DownloadItem.Title);
 
                 var reviewMessages = BuildPerFileStatusMessages(nonImported);
@@ -695,6 +703,58 @@ namespace NzbDrone.Core.Download
             {
                 _eventAggregator.PublishEvent(new DownloadCompletedEvent(trackedDownload, trackedDownload.RemoteAlbum.Artist.Id));
             }
+
+            return true;
+        }
+
+        // A destination collision usually means the destination file is real but the
+        // DB lost its TrackFile row (the detached-rows failure documented in
+        // data/homelab.md), which is checkable rather than guessable: rescan the
+        // artist's own folder and see whether the album's tracks adopt. Adopted ->
+        // this download is redundant, Imported + blocklist (V13). Not adopted -> a
+        // genuine naming collision between different releases, park for review as
+        // before.
+        private bool TryAdoptCollidedDestinationFiles(TrackedDownload trackedDownload, List<ImportResult> nonImported)
+        {
+            var artist = trackedDownload.RemoteAlbum?.Artist;
+            var albums = trackedDownload.RemoteAlbum?.Albums;
+            if (artist == null || artist.Path.IsNullOrWhiteSpace() || albums == null || albums.Empty())
+            {
+                return false;
+            }
+
+            var collisions = nonImported.Count(r =>
+                r.Errors != null && r.Errors.Any(e => MatchesAnyPrefix(e, _blockedNeedsReviewPrefixes)));
+            if (collisions == 0)
+            {
+                return false;
+            }
+
+            try
+            {
+                _diskScanService.Scan(new List<string> { artist.Path }, FilterFilesType.Known, false, new List<int> { artist.Id });
+            }
+            catch (Exception ex)
+            {
+                _logger.Warn(ex, "Rescan of {0} failed while resolving a destination collision; leaving the download parked for review.", artist.Path);
+                return false;
+            }
+
+            var adopted = albums.Sum(a => _mediaFileService.GetFilesByAlbum(a.Id).Count);
+            if (adopted < collisions)
+            {
+                return false;
+            }
+
+            _logger.Info(
+                "Download '{0}' collided with files already at the destination; a rescan of '{1}' adopted {2} tracks, so the library is satisfied. Marking Imported and blocklisting the release.",
+                trackedDownload.DownloadItem.Title,
+                artist.Path,
+                adopted);
+
+            trackedDownload.State = TrackedDownloadState.Imported;
+            BlocklistIfGrabbedByLidarr(trackedDownload, "Destination files already present; adopted by artist-folder rescan");
+            _eventAggregator.PublishEvent(new DownloadCompletedEvent(trackedDownload, artist.Id));
 
             return true;
         }

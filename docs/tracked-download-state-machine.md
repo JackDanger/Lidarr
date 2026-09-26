@@ -253,3 +253,20 @@ Three places reset state from outside the normal Import → result classificatio
   `IHandle<AlbumDeletedEvent>`, all of which call `_decisionCache.Clear()`.
   Cost is one round of identification on the next Import call (~25s cold per
   album folder), which is rare relative to user-edit frequency.
+
+- **V13 (destination-collision self-healing):** "Failed to import track,
+  Destination already exists" parked every collision as ImportBlocked for a
+  human, but the dominant real-world cause is a destination file whose
+  TrackFile row detached from the DB (a whole-root-scan casualty or a
+  restore), which needs no judgment call — it is checkable. **Fix:**
+  `TryHandleNonActionable`'s needsReview branch first calls
+  `TryAdoptCollidedDestinationFiles`, which rescans the artist's own folder
+  (scoped, seconds) and counts the album's TrackFiles. If at least as many
+  tracks adopted as collided, the library is provably satisfied: the
+  download is marked Imported and the release blocklisted (same
+  Imported+blocklist shape as the no-gain branch, so seeding torrents are
+  not re-failed every refresh). If adoption falls short, it is a genuine
+  naming collision between different releases and the item parks as
+  ImportBlocked exactly as before. A failed rescan also falls back to
+  parking. Ten queue items groomed by hand on 2026-09-26 motivated this;
+  six were the detached-row case.
