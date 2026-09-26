@@ -270,3 +270,13 @@ Three places reset state from outside the normal Import → result classificatio
   ImportBlocked exactly as before. A failed rescan also falls back to
   parking. Ten queue items groomed by hand on 2026-09-26 motivated this;
   six were the detached-row case.
+
+- **V14 (wrong-edition grabs are unimportable releases):** "Album release not
+  requested" means the grabbed release maps to an album edition the album is
+  not monitoring; re-grabbing the identical release always fails identically,
+  so it now lives in `_blocklistUnimportableReleasePrefixes` (blocklist +
+  skipRedownload, album stays wanted for a different release) instead of
+  parking in ImportFailed forever. Two such items were groomed by hand on
+  2026-09-26. The `AlbumSearch` command's final message also now reports
+  "N reports, G grabbed, P pending, R rejected" so an external caller can
+  distinguish nothing-found from everything-rejected without parsing logs.

@@ -75,7 +75,12 @@ namespace NzbDrone.Core.IndexerSearch
                 var decisions = _releaseSearchService.AlbumSearch(albumId, false, message.Trigger == CommandTrigger.Manual, false, message.IndexerIds).GetAwaiter().GetResult();
                 var processed = _processDownloadDecisions.ProcessDecisions(decisions).GetAwaiter().GetResult();
 
-                _logger.ProgressInfo("Album search completed. {0} reports downloaded.", processed.Grabbed.Count);
+                _logger.ProgressInfo(
+                    "Album search completed: {0} reports, {1} grabbed, {2} pending, {3} rejected.",
+                    decisions.Count,
+                    processed.Grabbed.Count,
+                    processed.Pending.Count,
+                    processed.Rejected.Count);
             }
         }
 

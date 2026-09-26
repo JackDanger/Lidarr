@@ -1,0 +1,23 @@
+name: wip-ci
+
+on:
+  push:
+    branches: [jackdanger/wip]
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Build backend
+        run: dotnet build src/Lidarr.sln -c Release
+      - name: Core unit tests
+        run: >
+          dotnet test src/NzbDrone.Core.Test/Lidarr.Core.Test.csproj
+          -c Release --no-build
+          --filter "TestCategory!=IntegrationTest&TestCategory!=AutomationTest&TestCategory!=DiskAccessTest"
+          --logger "console;verbosity=minimal"

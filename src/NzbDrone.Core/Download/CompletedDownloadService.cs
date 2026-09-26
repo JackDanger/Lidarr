@@ -451,6 +451,7 @@ namespace NzbDrone.Core.Download
         // a retry here means a re-grab, which is the duplicate-download problem itself.
         private static readonly string[] _blocklistUnimportableReleasePrefixes =
         {
+            "Album release not requested",
             "Album match is not close enough",
             "Couldn't parse track from",
             "Could not parse file for import",
