@@ -16,6 +16,7 @@ namespace NzbDrone.Core.IndexerSearch
     public interface ISearchForReleases
     {
         Task<List<DownloadDecision>> AlbumSearch(int albumId, bool missingOnly, bool userInvokedSearch, bool interactiveSearch);
+        Task<List<DownloadDecision>> AlbumSearch(int albumId, bool missingOnly, bool userInvokedSearch, bool interactiveSearch, List<int> indexerIds);
         Task<List<DownloadDecision>> ArtistSearch(int artistId, bool missingOnly, bool userInvokedSearch, bool interactiveSearch);
     }
 
@@ -42,9 +43,14 @@ namespace NzbDrone.Core.IndexerSearch
 
         public async Task<List<DownloadDecision>> AlbumSearch(int albumId, bool missingOnly, bool userInvokedSearch, bool interactiveSearch)
         {
+            return await AlbumSearch(albumId, missingOnly, userInvokedSearch, interactiveSearch, null);
+        }
+
+        public async Task<List<DownloadDecision>> AlbumSearch(int albumId, bool missingOnly, bool userInvokedSearch, bool interactiveSearch, List<int> indexerIds)
+        {
             var album = _albumService.GetAlbum(albumId);
 
-            return await AlbumSearch(album, missingOnly, userInvokedSearch, interactiveSearch);
+            return await AlbumSearch(album, missingOnly, userInvokedSearch, interactiveSearch, indexerIds);
         }
 
         public async Task<List<DownloadDecision>> ArtistSearch(int artistId, bool missingOnly, bool userInvokedSearch, bool interactiveSearch)
@@ -71,13 +77,14 @@ namespace NzbDrone.Core.IndexerSearch
             return DeDupeDecisions(downloadDecisions);
         }
 
-        public async Task<List<DownloadDecision>> AlbumSearch(Album album, bool missingOnly, bool userInvokedSearch, bool interactiveSearch)
+        public async Task<List<DownloadDecision>> AlbumSearch(Album album, bool missingOnly, bool userInvokedSearch, bool interactiveSearch, List<int> indexerIds = null)
         {
             var downloadDecisions = new List<DownloadDecision>();
 
             var artist = _artistService.GetArtist(album.ArtistId);
 
             var searchSpec = Get<AlbumSearchCriteria>(artist, new List<Album> { album }, userInvokedSearch, interactiveSearch);
+            searchSpec.IndexerIds = indexerIds;
 
             searchSpec.AlbumTitle = album.Title;
             if (album.ReleaseDate.HasValue)
@@ -128,6 +135,11 @@ namespace NzbDrone.Core.IndexerSearch
 
             // Filter indexers to untagged indexers and indexers with intersecting tags
             indexers = indexers.Where(i => i.Definition.Tags.Empty() || i.Definition.Tags.Intersect(criteriaBase.Artist.Tags).Any()).ToList();
+
+            if (criteriaBase.IndexerIds != null && criteriaBase.IndexerIds.Any())
+            {
+                indexers = indexers.Where(i => criteriaBase.IndexerIds.Contains(i.Definition.Id)).ToList();
+            }
 
             _logger.ProgressInfo("Searching indexers for {0}. {1} active indexers", criteriaBase, indexers.Count);
 

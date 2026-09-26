@@ -15,6 +15,7 @@ namespace NzbDrone.Core.IndexerSearch.Definitions
         public virtual bool MonitoredEpisodesOnly { get; set; }
         public virtual bool UserInvokedSearch { get; set; }
         public virtual bool InteractiveSearch { get; set; }
+        public List<int> IndexerIds { get; set; }
 
         public Artist Artist { get; set; }
         public List<Album> Albums { get; set; }

@@ -17,6 +17,8 @@ namespace NzbDrone.Core.IndexerSearch
                                IExecute<MissingAlbumSearchCommand>,
                                IExecute<CutoffUnmetAlbumSearchCommand>
     {
+        private const int MaxUnscopedMissingSearch = 1000;
+
         private readonly ISearchForReleases _releaseSearchService;
         private readonly IAlbumService _albumService;
         private readonly IAlbumCutoffService _albumCutoffService;
@@ -70,7 +72,7 @@ namespace NzbDrone.Core.IndexerSearch
         {
             foreach (var albumId in message.AlbumIds)
             {
-                var decisions = _releaseSearchService.AlbumSearch(albumId, false, message.Trigger == CommandTrigger.Manual, false).GetAwaiter().GetResult();
+                var decisions = _releaseSearchService.AlbumSearch(albumId, false, message.Trigger == CommandTrigger.Manual, false, message.IndexerIds).GetAwaiter().GetResult();
                 var processed = _processDownloadDecisions.ProcessDecisions(decisions).GetAwaiter().GetResult();
 
                 _logger.ProgressInfo("Album search completed. {0} reports downloaded.", processed.Grabbed.Count);
@@ -120,11 +122,15 @@ namespace NzbDrone.Core.IndexerSearch
                 _logger.Info("No missing albums found for {0} artist id.", message.ArtistId);
                 return;
             }
-            else
+
+            if (!message.ArtistId.HasValue && missing.Count > MaxUnscopedMissingSearch)
             {
-                _logger.Info("Searching for {0} missing albums for artist {1}.", missing.Count, message.ArtistId);
-                SearchForBulkAlbums(missing, message.Trigger == CommandTrigger.Manual).GetAwaiter().GetResult();
+                _logger.Error("Refusing to search {0} missing albums in one command; the whole-library missing search would exhaust every indexer's API quota. Search per artist, or use the paced backfill.", missing.Count);
+                return;
             }
+
+            _logger.Info("Searching for {0} missing albums for artist {1}.", missing.Count, message.ArtistId);
+            SearchForBulkAlbums(missing, message.Trigger == CommandTrigger.Manual).GetAwaiter().GetResult();
         }
 
         public void Execute(CutoffUnmetAlbumSearchCommand message)
@@ -142,6 +148,12 @@ namespace NzbDrone.Core.IndexerSearch
             var albums = _albumCutoffService.AlbumsWhereCutoffUnmet(pagingSpec).Records.ToList();
             var queue = _queueService.GetQueue().Where(q => q.Album != null).Select(q => q.Album.Id);
             var cutoffUnmet = albums.Where(e => !queue.Contains(e.Id)).ToList();
+
+            if (cutoffUnmet.Count > MaxUnscopedMissingSearch)
+            {
+                _logger.Error("Refusing to search {0} cutoff-unmet albums in one command; it would exhaust every indexer's API quota.", cutoffUnmet.Count);
+                return;
+            }
 
             SearchForBulkAlbums(cutoffUnmet, message.Trigger == CommandTrigger.Manual).GetAwaiter().GetResult();
         }
